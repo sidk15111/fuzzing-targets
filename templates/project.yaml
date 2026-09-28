@@ -1,0 +1,51 @@
+# --- Required -----------------------------------------------------------
+
+# The canonical, flat identifier for this project. Used as the OSS-Fuzz
+# projects/ symlink name, in GCS bucket paths, and in ClusterFuzz job
+# names -- completely independent of where this file physically lives in
+# this repo (projects/foo/project.yaml and projects/org/foo/project.yaml
+# are equally valid; this field is what actually identifies the project,
+# not the folder path).
+# Lowercase letters, digits, and hyphens only. Must be unique across every
+# project.yaml in this repo, regardless of folder.
+
+name: mosip-id-repository
+
+# jvm | c++ | python | go | rust | ... -- selects which base-builder-<lang>
+# image the build runs against.
+
+language: jvm
+
+# The upstream repo this project fuzzes. This is what a submission's
+# Dockerfile should git clone -- not something this repo forks or commits.
+
+main_repo: https://github.com/mosip/id-repository
+
+#for anything to do with c, c++ and rust feel free to use afl or libfuzzer
+#if it is java use only libfuzzer
+#if it is python then im not sure havent tested yet
+#if its go, pray
+
+fuzzing_engines:
+  - libfuzzer
+
+# So far the only meaningful choice for pure JVM projects is "address" --
+# see the project README for why (it's not memory-sanitizer instrumentation,
+# it's what turns on Jazzer's own bytecode-level security hooks).
+#feel free to add others if base c libraries are also being fuzzed
+
+sanitizers:
+  - address
+
+
+
+# --- Optional -------------------------------------------------------------
+
+# Who to contact if this project's build starts failing. At least one
+# entry required -- a GitHub handle or an email both work.
+maintainers:
+  - your-github-handle
+
+
+# Defaults to main_repo if omitted.
+# homepage: https://github.com/mosip/id-repository
