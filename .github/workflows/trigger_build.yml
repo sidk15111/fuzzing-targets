@@ -1,0 +1,23 @@
+name: Trigger build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "projects/**"
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  call-build:
+    # TODO: hardcoded to the one project that exists so far. Once a
+    # second project is onboarded, this needs to become a step that
+    # diffs the merge against its parent to find which project(s)
+    # actually changed, rather than a fixed project_path -- see the
+    # "affected projects" discussion in the standing plan.
+    uses: sidk15111/fuzzing-infra/.github/workflows/build_bot.yml@main
+    with:
+      project_path: projects/mosip/id-repository
+      repo_url: https://github.com/sidk15111/fuzzing-targets.git
