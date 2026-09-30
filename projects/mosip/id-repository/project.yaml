@@ -1,0 +1,13 @@
+name: mosip-id-repository
+
+language: jvm
+
+main_repo: "https://github.com/mosip/id-repository"
+
+#homepage: "https://github.com/mosip/id-repository"
+
+fuzzing_engines:
+  - libfuzzer
+
+sanitizers:
+  - address
