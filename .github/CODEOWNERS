@@ -1,0 +1,10 @@
+# Changes here define what actually executes with real cloud
+# credentials (build bot provisioning, WIF auth, the GCP commands) and
+# what gets accepted as a valid submission -- review required regardless
+# of who opens the PR, even if it's bundled into an otherwise-unrelated
+# change.
+#
+# projects/** is deliberately NOT listed here -- that stays the open
+# contribution surface.
+/.github/workflows/ @sidk15111
+/scripts/ @sidk15111
