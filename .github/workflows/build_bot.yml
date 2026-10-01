@@ -19,7 +19,7 @@ env:
   PROJECT_ID: sparc-vulnerability-detection
   ZONE: us-central1-b
   BUCKET: gs://sparc-fuzz-builds
-  INSTANCE_TEMPLATE: fuzzing-build-bot-v4
+  INSTANCE_TEMPLATE: fuzzing-build-bot-v5
   INSTANCE_NAME: fuzzing-build-bot-${{ github.run_id }}
 
 jobs:
