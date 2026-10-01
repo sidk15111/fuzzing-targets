@@ -1,0 +1,80 @@
+name: Build and upload
+
+# Reusable -- called locally from trigger_build.yml in this same repo.
+# Provisions one uniquely-named, ephemeral build bot per call, never
+# touches the shared instance group's size.
+on:
+  workflow_call:
+    inputs:
+      project_path:
+        description: "Path within this repo to this project's folder, e.g. projects/mosip/id-repository"
+        required: true
+        type: string
+      repo_url:
+        description: "Git URL of this repo"
+        required: true
+        type: string
+
+env:
+  PROJECT_ID: sparc-vulnerability-detection
+  ZONE: us-central1-b
+  BUCKET: gs://sparc-fuzz-builds
+  INSTANCE_TEMPLATE: fuzzing-build-bot-v4
+  INSTANCE_NAME: fuzzing-build-bot-${{ github.run_id }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/658175672767/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions-build-trigger@sparc-vulnerability-detection.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Provision a dedicated build bot for this run
+        run: |
+          gcloud compute instances create "$INSTANCE_NAME" \
+            --project="$PROJECT_ID" --zone="$ZONE" \
+            --source-instance-template="$INSTANCE_TEMPLATE"
+
+      - name: Wait for the bot to finish booting
+        run: |
+          # Polls for the READY marker install-docker.sh writes as its
+          # last action -- SSH coming up doesn't mean the startup script
+          # (apt installs, git clone) has actually finished yet.
+          for i in $(seq 1 30); do
+            if gcloud compute ssh "$INSTANCE_NAME" \
+                --project="$PROJECT_ID" --zone="$ZONE" \
+                --command="test -f /opt/build-tools/READY" 2>/dev/null; then
+              echo "Bot is ready."
+              exit 0
+            fi
+            echo "Not ready yet (attempt $i/30), waiting 20s..."
+            sleep 20
+          done
+          echo "FATAL: bot never became ready after 10 minutes"
+          exit 1
+
+      - name: Build, check_build, and upload
+        env:
+          REPO_URL: ${{ inputs.repo_url }}
+          PROJECT_PATH: ${{ inputs.project_path }}
+        run: |
+          gcloud compute ssh "$INSTANCE_NAME" \
+            --project="$PROJECT_ID" --zone="$ZONE" \
+            --command="/opt/build-tools/build_and_upload.sh --repo-url '$REPO_URL' --project-path '$PROJECT_PATH' --bucket '$BUCKET'"
+
+      - name: Delete the build bot
+        # Always, regardless of whether the steps above succeeded or
+        # failed -- an ephemeral bot that outlives a failed build is
+        # exactly the cost the whole per-build-instance design exists to
+        # avoid.
+        if: always()
+        run: |
+          gcloud compute instances delete "$INSTANCE_NAME" \
+            --project="$PROJECT_ID" --zone="$ZONE" --quiet

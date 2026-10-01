@@ -18,7 +18,13 @@ jobs:
     # diffs the merge against its parent to find which project(s)
     # actually changed, rather than a fixed project_path -- see the
     # "affected projects" discussion in the standing plan.
-    uses: sidk15111/fuzzing-infra/.github/workflows/build_bot.yml@main
+    #
+    # Local reusable workflow -- same repo now, so no owner/repo@ref, no
+    # Access setting, no visibility or actions-permissions interaction,
+    # and no WIF attribute-condition mismatch: this always runs as
+    # sidk15111/fuzzing-targets, matching the one condition set on the
+    # provider.
+    uses: ./.github/workflows/build_bot.yml
     with:
       project_path: projects/mosip/id-repository
       repo_url: https://github.com/sidk15111/fuzzing-targets.git
