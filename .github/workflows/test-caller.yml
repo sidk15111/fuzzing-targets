@@ -1,6 +1,0 @@
-name: Test caller
-on:
-  workflow_dispatch:
-jobs:
-  call:
-    uses: sidk15111/fuzzing-infra/.github/workflows/test-reusable.yml@main
