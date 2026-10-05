@@ -1,10 +1,12 @@
-# Changes here define what actually executes with real cloud
-# credentials (build bot provisioning, WIF auth, the GCP commands) and
-# what gets accepted as a valid submission -- review required regardless
-# of who opens the PR, even if it's bundled into an otherwise-unrelated
-# change.
+# Every path needs a maintainer's approval before merge. The first two
+# define what executes with real cloud credentials (build bot
+# provisioning, WIF auth) and what counts as a valid submission; projects/
+# is where a merged Dockerfile/build.sh later runs on the build bot, so
+# it's reviewed too -- the approval is the gate, not a formality.
 #
-# projects/** is deliberately NOT listed here -- that stays the open
-# contribution surface.
+# Later, projects/ can be scoped per-project (e.g. /projects/mosip/
+# owned by that project's own team) while workflows/ and scripts/ stay
+# with the core maintainers.
 /.github/workflows/ @sidk15111
 /scripts/ @sidk15111
+/projects/ @sidk15111

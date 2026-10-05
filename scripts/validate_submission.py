@@ -35,6 +35,10 @@ REQUIRED_FIELDS = {
 }
 NAME_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 REQUIRED_SIBLING_FILES = ["Dockerfile", "build.sh"]
+# Project directory paths flow into shell commands later -- including over
+# SSH on the build bot -- so anything outside a conservative character set
+# is rejected here rather than trusted downstream.
+PROJECT_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
 
 
 def find_projects(projects_root: Path) -> list[Path]:
@@ -66,8 +70,18 @@ def validate_dict_file(dict_path: Path) -> list[str]:
     return errors
 
 
-def validate_project(project_dir: Path, seen_names: dict[str, Path]) -> list[str]:
+def validate_project(
+    project_dir: Path, seen_names: dict[str, Path], projects_root: Path
+) -> list[str]:
     errors = []
+
+    rel_path = project_dir.relative_to(projects_root).as_posix()
+    if not PROJECT_PATH_PATTERN.match(rel_path):
+        errors.append(
+            f"{project_dir}: directory path {rel_path!r} contains characters "
+            f"outside [A-Za-z0-9._-] -- rejected because project paths are "
+            f"passed to shell commands downstream"
+        )
     yaml_path = project_dir / "project.yaml"
 
     for sibling in REQUIRED_SIBLING_FILES:
@@ -173,7 +187,7 @@ def main():
     seen_names: dict[str, Path] = {}
     all_errors: list[str] = []
     for project_dir in projects:
-        all_errors.extend(validate_project(project_dir, seen_names))
+        all_errors.extend(validate_project(project_dir, seen_names, args.projects_root))
 
     if all_errors:
         print(f"Validation failed -- {len(all_errors)} issue(s) found:\n", file=sys.stderr)
