@@ -1,0 +1,46 @@
+name: Detect projects
+
+# BUILDING BLOCK -- one question: "which projects does this change touch?"
+# Runs scripts/detect_projects.py. It only reads the list of changed paths
+# and looks for project.yaml files; it executes nothing from the change, so
+# it is safe to run first on an untrusted PR.
+on:
+  workflow_call:
+    inputs:
+      base:
+        description: "Revision to diff against: the PR's base, or a push's previous commit. Empty means HEAD~1."
+        type: string
+        required: false
+        default: ""
+      override:
+        description: "Skip the diff and use exactly this project directory (manual runs)."
+        type: string
+        required: false
+        default: ""
+    outputs:
+      projects:
+        description: "JSON list of touched project directories"
+        value: ${{ jobs.detect.outputs.projects }}
+      orphans:
+        description: "JSON list of added/modified files under projects/ that belong to no project"
+        value: ${{ jobs.detect.outputs.orphans }}
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.detect.outputs.projects }}
+      orphans: ${{ steps.detect.outputs.orphans }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the base commit must be present to diff against
+
+      - id: detect
+        env:
+          BASE: ${{ inputs.base }}
+          OVERRIDE: ${{ inputs.override }}
+        run: python3 scripts/detect_projects.py --base "$BASE" --override "$OVERRIDE"

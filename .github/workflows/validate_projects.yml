@@ -1,0 +1,47 @@
+name: Validate projects
+
+# BUILDING BLOCK -- one question: "are these submissions valid?"
+# Runs scripts/validate_submission.py. It reads and checks files; it
+# executes none of the submitter's code.
+#
+#   projects = '["projects/acme/foo"]'  validate just those (PRs, merges)
+#   projects = '[]'                     validate nothing (orphans still count)
+#   projects = ''                       validate the whole tree (scheduled)
+#
+# Project names are always checked for uniqueness against EVERY project.
+on:
+  workflow_call:
+    inputs:
+      projects:
+        description: "JSON list of project directories to validate. Empty means the whole tree."
+        type: string
+        required: false
+        default: ""
+      orphans:
+        description: "JSON list of files under projects/ that belong to no project (from detect_projects)."
+        type: string
+        required: false
+        default: "[]"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - run: pip install pyyaml
+
+      - env:
+          # Via env, never inline in the script: these hold PR-controlled paths.
+          PROJECTS: ${{ inputs.projects }}
+          ORPHANS: ${{ inputs.orphans }}
+        run: >
+          python3 scripts/validate_submission.py --projects-root projects
+          --only-json "$PROJECTS" --orphans-json "$ORPHANS"

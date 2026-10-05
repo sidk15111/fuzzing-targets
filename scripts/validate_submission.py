@@ -1,19 +1,34 @@
 #!/usr/bin/env python3
-"""Validates every project under a fuzzing-targets checkout's projects/ tree.
+"""Validates submissions under a fuzzing-targets checkout's projects/ tree.
 
 Deliberately does not execute anything a submitter wrote (no Dockerfile,
-no build.sh) -- this only inspects file presence and project.yaml content,
-which is why it's safe to run automatically and unattended on every PR,
-before any human has reviewed the submission.
+no build.sh) -- it only inspects file presence and project.yaml content,
+which is why it is safe to run automatically on every PR before any human
+has reviewed the submission.
+
+Two modes:
+  whole tree (default)   every project under --projects-root. This is the
+                         "is main healthy?" question, for scheduled runs.
+  scoped (--only-json)   only the listed projects. This is the "is THIS
+                         change valid?" question, for PRs and merges.
+                         `--only-json '[]'` means "validate nothing" (but
+                         --orphans-json is still checked).
+
+In both modes project names are checked for uniqueness against EVERY
+project, because a new project can collide with one the change didn't touch.
+A project the change didn't touch whose project.yaml is unreadable is
+skipped by that check, not blamed on this change.
 
 Usage:
-    python3 validate_submission.py --projects-root /path/to/fuzzing-targets/projects
+  validate_submission.py --projects-root projects
+  validate_submission.py --projects-root projects \\
+      --only-json '["projects/acme/foo"]' --orphans-json '[]'
 
-Exits 0 and prints a summary if everything passes. Exits 1 and prints
-every problem found (not just the first) otherwise, so a submitter or
-reviewer can fix everything in one pass rather than one-error-at-a-time.
+Exits 0 on success. Exits 1 and prints every problem found (not just the
+first) otherwise, so it can all be fixed in one pass.
 """
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -39,23 +54,68 @@ REQUIRED_SIBLING_FILES = ["Dockerfile", "build.sh"]
 # SSH on the build bot -- so anything outside a conservative character set
 # is rejected here rather than trusted downstream.
 PROJECT_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
-
-
-def find_projects(projects_root: Path) -> list[Path]:
-    """Every directory containing a project.yaml, at any depth -- this is
-    deliberately depth-agnostic so flat (projects/foo/) and nested
-    (projects/org/foo/) submissions are discovered identically."""
-    return sorted({p.parent for p in projects_root.rglob("project.yaml")})
-
-
 DICT_ENTRY_PATTERN = re.compile(r'^([A-Za-z0-9_]+=)?".*"$')
 
 
+def fatal(msg: str):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def parse_json_list(flag: str, raw):
+    """None / empty string -> None (flag not given). Otherwise a list of str."""
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as e:
+        fatal(f"{flag} is not valid JSON: {e}")
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        fatal(f"{flag} must be a JSON list of strings")
+    return value
+
+
+def find_projects(projects_root: Path) -> list[Path]:
+    """Every directory containing a project.yaml, at any depth -- depth-agnostic
+    so flat (projects/foo/) and nested (projects/org/foo/) are found alike."""
+    return sorted({p.parent for p in projects_root.rglob("project.yaml")})
+
+
+def build_name_index(projects_root: Path) -> dict[str, list[Path]]:
+    """name -> every project directory claiming it, across the WHOLE tree."""
+    index: dict[str, list[Path]] = {}
+    for yaml_path in sorted(projects_root.rglob("project.yaml")):
+        try:
+            with open(yaml_path) as f:
+                data = yaml.safe_load(f)
+        except (yaml.YAMLError, OSError, UnicodeDecodeError):
+            continue  # reported when THAT project is validated, not here
+        if isinstance(data, dict) and isinstance(data.get("name"), str):
+            index.setdefault(data["name"], []).append(yaml_path.parent)
+    return index
+
+
+def resolve_scoped(projects_root: Path, only: list[str]):
+    errors, dirs = [], []
+    root_resolved = projects_root.resolve()
+    for raw in only:
+        try:
+            rel = Path(raw).resolve().relative_to(root_resolved)
+        except ValueError:
+            errors.append(f"{raw!r}: not inside {projects_root}")
+            continue
+        d = projects_root / rel
+        if not (d / "project.yaml").is_file():
+            errors.append(f"{raw!r}: no project.yaml in that directory")
+            continue
+        dirs.append(d)
+    return sorted(set(dirs)), errors
+
+
 def validate_dict_file(dict_path: Path) -> list[str]:
-    """Checks each non-comment, non-blank line matches libFuzzer's own
-    dictionary format: "token" or name="token". Doesn't fully validate
-    escape sequences inside the string -- just catches the common
-    mistake of a bare, unquoted line."""
+    """Each non-comment, non-blank line must look like libFuzzer's dictionary
+    format: "token" or name="token". Doesn't validate escape sequences inside
+    the string -- just catches the common mistake of a bare, unquoted line."""
     errors = []
     with open(dict_path) as f:
         for lineno, line in enumerate(f, start=1):
@@ -71,11 +131,21 @@ def validate_dict_file(dict_path: Path) -> list[str]:
 
 
 def validate_project(
-    project_dir: Path, seen_names: dict[str, Path], projects_root: Path
+    project_dir: Path,
+    projects_root: Path,
+    name_index: dict[str, list[Path]],
+    scoped: bool,
 ) -> list[str]:
     errors = []
+    rel = project_dir.relative_to(projects_root)
 
-    rel_path = project_dir.relative_to(projects_root).as_posix()
+    if rel == Path("."):
+        return [
+            f"{project_dir}/project.yaml: a project.yaml directly inside projects/ "
+            f"is not allowed -- it would claim every project beneath it"
+        ]
+
+    rel_path = rel.as_posix()
     if not PROJECT_PATH_PATTERN.match(rel_path):
         errors.append(
             f"{project_dir}: directory path {rel_path!r} contains characters "
@@ -117,48 +187,41 @@ def validate_project(
                 f"{yaml_path}: 'name: {name}' -- must be lowercase letters, "
                 f"digits, and hyphens only"
             )
-        elif name in seen_names:
-            errors.append(
-                f"{yaml_path}: 'name: {name}' collides with the project at "
-                f"{seen_names[name]} -- names must be unique across the whole "
-                f"repo regardless of folder path"
-            )
         else:
-            seen_names[name] = project_dir
-
-    # If seeds/ exists, every subdirectory under it should correspond to a
-    # declared fuzz target -- catches a typo'd seed folder that would
-    # otherwise silently never get zipped into any *_seed_corpus.zip and
-    # never reach a fuzzer at all, with nothing else likely to notice.
-    fuzz_targets = data.get("fuzz_targets")
-    seeds_dir = project_dir / "seeds"
-    if isinstance(fuzz_targets, list) and seeds_dir.is_dir():
-        declared = set(fuzz_targets)
-        for seed_subdir in seeds_dir.iterdir():
-            if seed_subdir.is_dir() and seed_subdir.name not in declared:
+            owners = name_index.get(name, [])
+            others = [p for p in owners if p != project_dir]
+            # Whole-tree mode sees every collision from both sides; report it
+            # once, against the later project. Scoped mode always reports it
+            # against the project this change touched.
+            if others and (scoped or project_dir != min(owners)):
                 errors.append(
-                    f"{seed_subdir}: seed directory name doesn't match any "
-                    f"entry in this project's fuzz_targets ({sorted(declared)}) "
-                    f"-- these seeds will never be zipped into any fuzzer's "
-                    f"build output"
+                    f"{yaml_path}: 'name: {name}' is also claimed by "
+                    f"{', '.join(str(p) for p in others)} -- names must be unique "
+                    f"across the whole repo regardless of folder path"
                 )
 
-    # Same reasoning, same mechanism, for .dict files -- a name that
-    # doesn't match any declared fuzz target means it's dead weight,
-    # never attached to anything build.sh actually produces. Also check
-    # the file's own format, since a malformed dict is accepted silently
-    # by libFuzzer at fuzz time (it just gets ignored) rather than erroring
-    # -- this is the only point in the pipeline where a typo here would
-    # ever surface at all.
+    # Seed folders and .dict files only matter if they match a declared fuzz
+    # target: otherwise they are never attached to anything build.sh produces,
+    # and nothing else would ever notice.
+    fuzz_targets = data.get("fuzz_targets")
     if isinstance(fuzz_targets, list):
         declared = set(fuzz_targets)
+        seeds_dir = project_dir / "seeds"
+        if seeds_dir.is_dir():
+            for seed_subdir in sorted(seeds_dir.iterdir()):
+                if seed_subdir.is_dir() and seed_subdir.name not in declared:
+                    errors.append(
+                        f"{seed_subdir}: seed directory name doesn't match any "
+                        f"entry in this project's fuzz_targets ({sorted(declared)}) "
+                        f"-- these seeds will never be zipped into any fuzzer's "
+                        f"build output"
+                    )
         for dict_file in sorted(project_dir.glob("*.dict")):
             if dict_file.stem not in declared:
                 errors.append(
                     f"{dict_file}: dictionary name doesn't match any entry "
                     f"in this project's fuzz_targets ({sorted(declared)}) "
-                    f"-- it will never be attached to any fuzzer's build "
-                    f"output"
+                    f"-- it will never be attached to any fuzzer's build output"
                 )
             errors.extend(validate_dict_file(dict_file))
 
@@ -166,38 +229,57 @@ def validate_project(
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--projects-root",
-        type=Path,
-        required=True,
-        help="Path to the projects/ directory of a fuzzing-targets checkout",
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    parser.add_argument("--projects-root", type=Path, required=True)
+    parser.add_argument("--only-json", default=None,
+                        help="JSON list of project dirs to validate; omit/empty = whole tree")
+    parser.add_argument("--orphans-json", default=None,
+                        help="JSON list of files under projects/ that belong to no project")
     args = parser.parse_args()
 
-    if not args.projects_root.is_dir():
-        print(f"ERROR: {args.projects_root} does not exist or is not a directory", file=sys.stderr)
-        sys.exit(1)
+    root = args.projects_root
+    if not root.is_dir():
+        fatal(f"{root} does not exist or is not a directory")
 
-    projects = find_projects(args.projects_root)
-    if not projects:
-        print("No projects found -- nothing to validate.")
-        return
+    only = parse_json_list("--only-json", args.only_json)
+    orphans = parse_json_list("--orphans-json", args.orphans_json) or []
 
-    seen_names: dict[str, Path] = {}
     all_errors: list[str] = []
+    name_index = build_name_index(root)
+
+    if only is None:
+        projects, scoped = find_projects(root), False
+    else:
+        projects, scope_errors = resolve_scoped(root, only)
+        all_errors.extend(scope_errors)
+        scoped = True
+
     for project_dir in projects:
-        all_errors.extend(validate_project(project_dir, seen_names, args.projects_root))
+        all_errors.extend(validate_project(project_dir, root, name_index, scoped))
+
+    for path in orphans:
+        all_errors.append(
+            f"{path}: a file under projects/ that belongs to no project -- it needs "
+            f"a project.yaml in its own folder or a parent folder (below projects/)"
+        )
 
     if all_errors:
         print(f"Validation failed -- {len(all_errors)} issue(s) found:\n", file=sys.stderr)
         for err in all_errors:
-            print(f"  - {err}", file=sys.stderr)
+            # One error per line, so a hostile filename can't start a fresh
+            # line of its own (e.g. with a GitHub "::" workflow command).
+            print("  - " + err.replace("\r", "\\r").replace("\n", "\\n"), file=sys.stderr)
         sys.exit(1)
 
-    print(f"All {len(projects)} project(s) passed validation:")
-    for project_dir in projects:
-        print(f"  - {project_dir}")
+    mode = "scoped" if scoped else "whole tree"
+    if not projects:
+        print(f"Nothing to validate ({mode}).")
+    else:
+        print(f"{len(projects)} project(s) passed validation ({mode}):")
+        for project_dir in projects:
+            print(f"  - {project_dir}")
 
 
 if __name__ == "__main__":
