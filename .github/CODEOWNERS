@@ -1,3 +1,5 @@
+* @sidk15111
+
 # Every path needs a maintainer's approval before merge. The first two
 # define what executes with real cloud credentials (build bot
 # provisioning, WIF auth) and what counts as a valid submission; projects/
@@ -7,6 +9,9 @@
 # Later, projects/ can be scoped per-project (e.g. /projects/mosip/
 # owned by that project's own team) while workflows/ and scripts/ stay
 # with the core maintainers.
-/.github/workflows/ @sidk15111
-/scripts/ @sidk15111
+#/.github/workflows/ @sidk15111
+#/scripts/ @sidk15111
+
+
+# can be a wider group later
 /projects/ @sidk15111
