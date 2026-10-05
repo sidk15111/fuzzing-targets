@@ -69,3 +69,4 @@ in this repo, regardless of where it lives.
 - [ ] At least one fuzz harness that will actually get compiled by `build.sh`
 - [ ] If fuzzing a third-party repo: cloned fresh in the Dockerfile, not
       forked or committed here
+
