@@ -11,3 +11,10 @@ fuzzing_engines:
 
 sanitizers:
   - address
+
+fuzz_targets:
+  - HashFuzzer
+  - HashWithSaltFuzzer
+  - ValidateTypeFuzzer
+  - ValidateIdTypeFuzzer
+  - RetrieveIdentityFuzzer
