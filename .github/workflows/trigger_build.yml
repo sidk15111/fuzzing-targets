@@ -6,25 +6,83 @@ on:
     paths:
       - "projects/**"
   workflow_dispatch:
-
-permissions:
-  id-token: write
-  contents: read
+    inputs:
+      project_path:
+        description: "Specific project to build, e.g. projects/mosip/id-repository. Leave empty to auto-detect from the last push's diff."
+        required: false
+        type: string
 
 jobs:
+  detect-changed-projects:
+    runs-on: ubuntu-latest
+    outputs:
+      projects: ${{ steps.detect.outputs.projects }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # need history to diff against, not just the tip
+
+      - name: Determine which project(s) changed
+        id: detect
+        run: |
+          if [ -n "${{ inputs.project_path }}" ]; then
+            # Manual override -- skip diffing entirely.
+            echo "projects=[\"${{ inputs.project_path }}\"]" >> "$GITHUB_OUTPUT"
+            echo "Manual override: ${{ inputs.project_path }}"
+            exit 0
+          fi
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # No natural "before" commit for a manual run with no override --
+            # fall back to the previous commit.
+            BASE="HEAD~1"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+
+          CHANGED_FILES=$(git diff --name-only "$BASE" "${{ github.sha }}" -- 'projects/**' || true)
+
+          # Any contributor, any project: walk up from each changed file to
+          # its nearest ancestor directory containing a project.yaml. This
+          # is the same discovery contract validate_submission.py uses --
+          # a project is "the directory with a project.yaml in it", not a
+          # fixed depth or a fixed name.
+          declare -A FOUND
+          for f in $CHANGED_FILES; do
+            dir=$(dirname "$f")
+            while [ "$dir" != "." ] && [ "$dir" != "/" ]; do
+              if [ -f "$dir/project.yaml" ]; then
+                FOUND["$dir"]=1
+                break
+              fi
+              dir=$(dirname "$dir")
+            done
+          done
+
+          if [ ${#FOUND[@]} -eq 0 ]; then
+            echo "No project.yaml found among changed files -- nothing to build."
+            echo "projects=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          JSON=$(printf '%s\n' "${!FOUND[@]}" | sort -u | jq -R . | jq -sc .)
+          echo "Affected project(s): ${!FOUND[@]}"
+          echo "projects=$JSON" >> "$GITHUB_OUTPUT"
+
   call-build:
-    # TODO: hardcoded to the one project that exists so far. Once a
-    # second project is onboarded, this needs to become a step that
-    # diffs the merge against its parent to find which project(s)
-    # actually changed, rather than a fixed project_path -- see the
-    # "affected projects" discussion in the standing plan.
-    #
-    # Local reusable workflow -- same repo now, so no owner/repo@ref, no
-    # Access setting, no visibility or actions-permissions interaction,
-    # and no WIF attribute-condition mismatch: this always runs as
-    # sidk15111/fuzzing-targets, matching the one condition set on the
-    # provider.
+    needs: detect-changed-projects
+    if: needs.detect-changed-projects.outputs.projects != '[]'
+    strategy:
+      matrix:
+        project_path: ${{ fromJson(needs.detect-changed-projects.outputs.projects) }}
+      fail-fast: false  # one project's build failing shouldn't cancel another's
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/build_bot.yml
     with:
-      project_path: projects/mosip/id-repository
-      repo_url: https://github.com/sidk15111/fuzzing-targets.git
+      project_path: ${{ matrix.project_path }}
+      # Dynamic rather than hardcoded -- stays correct if this repo is
+      # ever renamed or transferred to another owner (e.g. the planned
+      # move to the company account) with no edit needed here.
+      repo_url: ${{ github.server_url }}/${{ github.repository }}.git

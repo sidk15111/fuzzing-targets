@@ -44,6 +44,28 @@ def find_projects(projects_root: Path) -> list[Path]:
     return sorted({p.parent for p in projects_root.rglob("project.yaml")})
 
 
+DICT_ENTRY_PATTERN = re.compile(r'^([A-Za-z0-9_]+=)?".*"$')
+
+
+def validate_dict_file(dict_path: Path) -> list[str]:
+    """Checks each non-comment, non-blank line matches libFuzzer's own
+    dictionary format: "token" or name="token". Doesn't fully validate
+    escape sequences inside the string -- just catches the common
+    mistake of a bare, unquoted line."""
+    errors = []
+    with open(dict_path) as f:
+        for lineno, line in enumerate(f, start=1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if not DICT_ENTRY_PATTERN.match(stripped):
+                errors.append(
+                    f"{dict_path}:{lineno}: not a valid dictionary entry "
+                    f'(expected "token" or name="token"): {stripped!r}'
+                )
+    return errors
+
+
 def validate_project(project_dir: Path, seen_names: dict[str, Path]) -> list[str]:
     errors = []
     yaml_path = project_dir / "project.yaml"
@@ -106,6 +128,25 @@ def validate_project(project_dir: Path, seen_names: dict[str, Path]) -> list[str
                     f"-- these seeds will never be zipped into any fuzzer's "
                     f"build output"
                 )
+
+    # Same reasoning, same mechanism, for .dict files -- a name that
+    # doesn't match any declared fuzz target means it's dead weight,
+    # never attached to anything build.sh actually produces. Also check
+    # the file's own format, since a malformed dict is accepted silently
+    # by libFuzzer at fuzz time (it just gets ignored) rather than erroring
+    # -- this is the only point in the pipeline where a typo here would
+    # ever surface at all.
+    if isinstance(fuzz_targets, list):
+        declared = set(fuzz_targets)
+        for dict_file in sorted(project_dir.glob("*.dict")):
+            if dict_file.stem not in declared:
+                errors.append(
+                    f"{dict_file}: dictionary name doesn't match any entry "
+                    f"in this project's fuzz_targets ({sorted(declared)}) "
+                    f"-- it will never be attached to any fuzzer's build "
+                    f"output"
+                )
+            errors.extend(validate_dict_file(dict_file))
 
     return errors
 
