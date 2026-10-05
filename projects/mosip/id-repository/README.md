@@ -64,3 +64,4 @@ Jazzer-instrumented JVM -- no Spring context boots, no port opens, no config
 server or Postgres is ever contacted. We only need the plain `.jar` that
 `mvn package` produces, several build phases before that Dockerfile would
 even be relevant.
+yay
