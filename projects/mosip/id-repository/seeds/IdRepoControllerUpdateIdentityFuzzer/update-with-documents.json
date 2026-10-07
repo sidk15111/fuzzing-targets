@@ -1,0 +1,1 @@
+{"id":"mosip.id.update","version":"v1","requesttime":"2024-01-15T10:30:00.000Z","request":{"registrationId":"10001100010000620200101000000","identity":{"IDSchemaVersion":0.1,"UIN":"2419762130","phone":"9395910872"},"documents":[{"category":"proofOfAddress","value":"dGVzdA=="}]}}

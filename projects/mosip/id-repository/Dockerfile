@@ -37,9 +37,13 @@ RUN git clone --depth 1 https://github.com/mosip/id-repository.git \
 
 # OSS-Fuzz plumbing -- harness files sit at $SRC root, sibling to the
 # project source, matching the vulnjava layout. seeds/ (loose per-fuzzer
-# seed files, see project README) and the two .dict files are committed
+# seed files, see project README) and the .dict files are committed
 # in this repo the same way vulnfuzz commits seeds/ -- zipped into the
-# actual *_seed_corpus.zip by build.sh, not pre-zipped here.
+# actual *_seed_corpus.zip by build.sh, not pre-zipped here. *.java also
+# picks up shared helper classes (e.g. IdRepoFuzzSupport.java), and
+# fixtures/ holds plain resource files (e.g. identity-mapping.json) that
+# build.sh copies into $OUT for harnesses to load from the classpath.
 COPY *.java *.dict $SRC/
 COPY seeds/ $SRC/seeds/
+COPY fixtures/ $SRC/fixtures/
 COPY build.sh $SRC/
