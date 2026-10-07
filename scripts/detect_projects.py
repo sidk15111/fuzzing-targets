@@ -18,6 +18,9 @@ Usage:
   detect_projects.py --base <sha>                  diff <sha>..HEAD
   detect_projects.py --base ""                     no base known -> HEAD~1..HEAD
   detect_projects.py --override projects/org/foo   skip the diff entirely
+  detect_projects.py --all                         every project in the tree
+                                                   (scheduled rebuilds); orphans
+                                                   are reported the same way
 """
 import argparse
 import json
@@ -65,6 +68,27 @@ def find_project(path: str, root: Path):
     return None
 
 
+def classify(root: Path, paths: list[str], deleted=frozenset()):
+    """Map paths to the projects they belong to; anything that belongs to no
+    project (and isn't allowlisted or deleted) is an orphan. Shared by the
+    diff mode and the all mode so the two can never disagree."""
+    projects, orphans = set(), []
+    for path in paths:
+        proj = find_project(path, root)
+        if proj:
+            projects.add(proj)  # includes deletions inside a surviving project
+        elif path not in deleted and path not in ORPHAN_ALLOWLIST:
+            orphans.append(path)
+    return sorted(projects), sorted(orphans)
+
+
+def detect_all(root: Path):
+    """Every project in the tree, found from git-tracked files only, so it
+    matches exactly what a fresh checkout contains."""
+    tracked = git_paths(root, "ls-files", "-z", "--", PROJECTS_DIR)
+    return classify(root, tracked)
+
+
 def detect(root: Path, base: str, head: str):
     if not base or set(base) == {"0"}:  # empty, or git's all-zeros "no previous commit"
         base = f"{head}~1"
@@ -76,14 +100,7 @@ def detect(root: Path, base: str, head: str):
     changed = git_paths(root, *diff, "--", PROJECTS_DIR)
     deleted = set(git_paths(root, *diff[:2], "--diff-filter=D", *diff[2:], "--", PROJECTS_DIR))
 
-    projects, orphans = set(), []
-    for path in changed:
-        proj = find_project(path, root)
-        if proj:
-            projects.add(proj)  # includes deletions inside a surviving project
-        elif path not in deleted and path not in ORPHAN_ALLOWLIST:
-            orphans.append(path)
-    return sorted(projects), sorted(orphans)
+    return classify(root, changed, deleted)
 
 
 def from_override(root: Path, raw: str):
@@ -100,11 +117,20 @@ def main():
     ap.add_argument("--base", default="", help="base revision; empty means HEAD~1")
     ap.add_argument("--head", default="HEAD")
     ap.add_argument("--override", default="", help="build exactly this project, skip the diff")
+    ap.add_argument("--all", action="store_true", help="every project in the tree, no diff")
     ap.add_argument("--root", type=Path, default=Path("."))
     ap.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT", ""))
     args = ap.parse_args()
 
-    if args.override.strip():
+    if args.all and args.override.strip():
+        fail("--all and --override are mutually exclusive")
+
+    if args.all:
+        projects, orphans = detect_all(args.root)
+        print(f"All project(s): {projects or 'none'}")
+        if orphans:
+            print(f"Files under {PROJECTS_DIR}/ that belong to no project: {orphans!r}")
+    elif args.override.strip():
         projects, orphans = from_override(args.root, args.override)
         print(f"Manual override: {projects[0]}")
     else:
