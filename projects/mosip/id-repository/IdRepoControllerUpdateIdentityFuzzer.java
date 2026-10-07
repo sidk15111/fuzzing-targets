@@ -15,9 +15,14 @@ import com.code_intelligence.jazzer.api.FuzzedDataProvider;
  */
 public class IdRepoControllerUpdateIdentityFuzzer {
 
-    private static final MockMvc MVC = IdRepoFuzzSupport.newMockMvc(true);
+    private static MockMvc mvc;
+
+    // Runs before the first timed unit; see IdRepoControllerAddIdentityFuzzer.
+    public static void fuzzerInitialize() {
+        mvc = IdRepoFuzzSupport.newMockMvc(true);
+    }
 
     public static void fuzzerTestOneInput(FuzzedDataProvider data) {
-        IdRepoFuzzSupport.fuzz(MVC, true, data.consumeRemainingAsBytes());
+        IdRepoFuzzSupport.fuzz(mvc, true, data.consumeRemainingAsBytes());
     }
 }
