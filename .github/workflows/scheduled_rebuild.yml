@@ -1,0 +1,140 @@
+name: Scheduled rebuild
+
+# PIPELINE 3 -- runs on a timer (and by hand). Approved code, WITH credentials:
+#
+#   detect (all) -> validate (whole tree) -> build (one bot per project) -> notify
+#
+# Purpose: pick up upstream changes (e.g. MOSIP pushing to id-repository)
+# that no PR in this repo can see. It is a second trigger for the same
+# building blocks trigger_build.yml uses; nothing new runs on the bot.
+#
+# Scheduled runs execute on the default branch, so the OIDC token carries
+# refs/heads/main and passes the WIF condition. A manual run from any other
+# branch fails at GCP auth, by design (this is also how to test notify).
+on:
+  schedule:
+    # 03:00 UTC (~08:30 IST) on the 1st, 11th and 21st: gaps of 10, 10, then
+    # 10-11 days. GitHub cron has no "every N days" that survives month ends.
+    - cron: "0 3 1,11,21 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One rebuild at a time. A running rebuild is never killed; a newer one waits.
+# (GitHub keeps only ONE waiting run per group, so a third trigger replaces
+# the waiting second one -- fine for a rebuild-everything job.)
+concurrency:
+  group: scheduled-rebuild
+  cancel-in-progress: false
+
+jobs:
+  # 1. Every project in the tree, not just what a diff touched.
+  detect:
+    uses: ./.github/workflows/detect_projects.yml
+    with:
+      all: true
+
+  # 2. Whole-tree validation ('' = no scoping). Fails closed: if ANY project
+  #    on main is invalid, no project is rebuilt, and notify says so.
+  validate:
+    needs: detect
+    uses: ./.github/workflows/validate_projects.yml
+    with:
+      projects: ""
+      orphans: ${{ needs.detect.outputs.orphans }}
+
+  # 3. One bot per project.
+  call-build:
+    needs: [detect, validate]
+    if: needs.detect.outputs.projects != '[]'
+    strategy:
+      fail-fast: false  # one broken project must not stop the others
+      max-parallel: 5   # bounds simultaneous bots (GCE quota, runner slots); the rest queue
+      matrix:
+        project_path: ${{ fromJson(needs.detect.outputs.projects) }}
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/build_bot.yml
+    with:
+      project_path: ${{ matrix.project_path }}
+      repo_url: ${{ github.server_url }}/${{ github.repository }}.git
+
+  # 4. Tell a human. Failure -> open an issue (or comment on the open one).
+  #    Success -> comment on and close an open issue, so it reflects reality.
+  #    Skipped if the run was cancelled by hand.
+  notify:
+    needs: [detect, validate, call-build]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      actions: read    # to list which jobs failed
+      contents: read
+    steps:
+      - name: Open, update or close the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DETECT_RESULT: ${{ needs.detect.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          BUILD_RESULT: ${{ needs.call-build.result }}
+        run: |
+          set -euo pipefail
+          TITLE="Scheduled rebuild failed"
+
+          FAILED=false
+          for r in "$DETECT_RESULT" "$VALIDATE_RESULT" "$BUILD_RESULT"; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then FAILED=true; fi
+          done
+
+          EXISTING=$(gh issue list --repo "$REPO" --state open --search "\"$TITLE\" in:title" \
+            --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
+
+          if [ "$FAILED" = "true" ]; then
+            FAILED_JOBS=$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs" --paginate \
+              --jq '.jobs[] | select(.conclusion == "failure") | "- " + .name')
+            {
+              echo "Run: $RUN_URL"
+              echo
+              echo "detect: $DETECT_RESULT / validate: $VALIDATE_RESULT / build: $BUILD_RESULT"
+              echo
+              echo "Failed jobs:"
+              echo '```'
+              echo "${FAILED_JOBS:-"(none listed -- see the run)"}"
+              echo '```'
+            } > body.md
+
+            if [ -n "$EXISTING" ]; then
+              gh issue comment "$EXISTING" --repo "$REPO" --body-file body.md
+              echo "Commented on #$EXISTING"
+            else
+              gh issue create --repo "$REPO" --title "$TITLE" --body-file body.md
+            fi
+          elif [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" --repo "$REPO" \
+              --comment "Recovered: all projects rebuilt successfully in $RUN_URL"
+            echo "Closed #$EXISTING"
+          else
+            echo "All good, nothing to report."
+          fi
+
+  # 5. Best-effort: GitHub disables scheduled workflows in public repos after
+  #    60 days without repo activity. Re-enabling the workflow is the usual
+  #    workaround, but it is UNVERIFIED that this resets the clock with
+  #    GITHUB_TOKEN. continue-on-error so it can never turn the run red.
+  #    Fallback: push any commit, or run this workflow by hand, at least
+  #    every ~50 days.
+  keepalive:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      actions: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow enable scheduled_rebuild.yml --repo "${{ github.repository }}"

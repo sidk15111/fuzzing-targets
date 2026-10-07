@@ -1,6 +1,7 @@
 name: Detect projects
 
 # BUILDING BLOCK -- one question: "which projects does this change touch?"
+# (or, with all: true, "which projects exist?" -- for scheduled rebuilds).
 # Runs scripts/detect_projects.py. It only reads the list of changed paths
 # and looks for project.yaml files; it executes nothing from the change, so
 # it is safe to run first on an untrusted PR.
@@ -17,6 +18,11 @@ on:
         type: string
         required: false
         default: ""
+      all:
+        description: "Ignore the diff and return every project in the tree (scheduled rebuilds)."
+        type: boolean
+        required: false
+        default: false
     outputs:
       projects:
         description: "JSON list of touched project directories"
@@ -43,4 +49,8 @@ jobs:
         env:
           BASE: ${{ inputs.base }}
           OVERRIDE: ${{ inputs.override }}
-        run: python3 scripts/detect_projects.py --base "$BASE" --override "$OVERRIDE"
+          ALL: ${{ inputs.all }}
+        run: |
+          ARGS=()
+          if [ "$ALL" = "true" ]; then ARGS+=(--all); fi
+          python3 scripts/detect_projects.py --base "$BASE" --override "$OVERRIDE" "${ARGS[@]}"
