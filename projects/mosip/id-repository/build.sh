@@ -56,8 +56,9 @@ cp "$CORE_JAR" "$OUT/id-repository-core.jar"
 cp "$IDENTITY_JAR" "$OUT/id-repository-identity-service.jar"
 
 # --- Step 2: pull in Mockito + ReflectionTestUtils' jar (spring-test). ------
-# These are dependencies OF THE HARNESS (RetrieveIdentityFuzzer fakes out a
-# JPA repository), not of id-repository's production code, so they're
+# These are dependencies OF THE HARNESSES (Mockito fakes, and Spring's
+# MockMvc/spring-test for the controller-level harnesses), not of
+# id-repository's production code, so they're
 # resolved here rather than by touching id-repository's own pom.xml -- same
 # idea as pulling commons-collections in for vulnjava's deserialization
 # level.
@@ -73,14 +74,25 @@ cp "$IDENTITY_JAR" "$OUT/id-repository-identity-service.jar"
 mvn -pl id-repository-identity-service dependency:copy-dependencies \
     -DincludeScope=test -DoutputDirectory="$OUT" -DoverWriteIfNewer=true
 
-# --- Step 2b: seed corpora + dictionaries for the two validators that -----
-# gate on an exact match against a small, fixed set of strings. Same
-# mechanism vulnfuzz uses (seeds/ committed as loose files, zipped here at
-# build time) -- see this repo's seeds/ directory for the actual values
-# and the reasoning behind each one.
-zip -j "$OUT/ValidateTypeFuzzer_seed_corpus.zip" "$SRC"/seeds/ValidateTypeFuzzer/*
-zip -j "$OUT/ValidateIdTypeFuzzer_seed_corpus.zip" "$SRC"/seeds/ValidateIdTypeFuzzer/*
+# --- Step 2b: seed corpora, dictionaries, and fixtures. ---------------------
+# Seeds: every seeds/<Name>/ directory that has a matching harness
+# (<Name>.java) is zipped to <Name>_seed_corpus.zip (ClusterFuzz's naming
+# convention, sitting next to the fuzz target in $OUT). Same mechanism
+# vulnfuzz uses (seeds/ committed as loose files, zipped here at build time),
+# but generic, so adding a harness's seeds needs no edit to this script.
+# A seeds/ directory with no matching harness is skipped rather than shipped.
+for seed_dir in "$SRC"/seeds/*/; do
+  seed_name=$(basename "$seed_dir")
+  if [ -f "$SRC/$seed_name.java" ] && [ -n "$(ls -A "$seed_dir")" ]; then
+    zip -j "$OUT/${seed_name}_seed_corpus.zip" "$seed_dir"*
+  fi
+done
 cp "$SRC"/*.dict "$OUT/"
+
+# Fixtures: plain files harnesses load as classpath resources (e.g.
+# identity-mapping.json, read by IdRepoFuzzSupport). Copied flat into $OUT,
+# which the wrapper script puts on the runtime classpath ($this_dir).
+cp "$SRC"/fixtures/* "$OUT/"
 
 # --- Step 3: bundle a JDK 21 for the runner, then compile+wrap each --------
 # harness so ClusterFuzz can run it like any other libFuzzer binary.
@@ -101,10 +113,27 @@ PROJECT_JARS=$(cd "$OUT" && ls *.jar)
 BUILD_CLASSPATH=$(echo $PROJECT_JARS | xargs printf -- "$OUT/%s:"):$JAZZER_API_PATH
 RUNTIME_CLASSPATH=$(echo $PROJECT_JARS | xargs printf -- "\$this_dir/%s:"):\$this_dir
 
+# Compile ALL top-level .java files together (the *Fuzzer.java harnesses AND
+# any shared helper such as IdRepoFuzzSupport.java, which deliberately does
+# not end in "Fuzzer" so it is never wrapped as a fuzz target), then copy
+# every resulting .class into $OUT. Compiling one harness at a time and
+# copying only <Name>.class would drop helper classes and nested/anonymous
+# classes (Foo$Bar.class), which fail at runtime with NoClassDefFoundError.
+# -proc:none: nothing here needs annotation processing, and lombok and other
+# processors are on the classpath via copy-dependencies above.
+HARNESS_CLASSES="$SRC/harness-classes"
+mkdir -p "$HARNESS_CLASSES"
+javac -proc:none -cp $BUILD_CLASSPATH -d "$HARNESS_CLASSES" $(find "$SRC" -maxdepth 1 -name '*.java')
+cp -r "$HARNESS_CLASSES"/. "$OUT/"
+
+# Only count coverage in code we care about. Instrumenting every class that
+# loads (Spring, Mockito, byte-buddy, ...) slows the run and dilutes the
+# coverage signal. Jackson and JsonPath stay in so the fuzzer gets feedback
+# from their parsers and learns to produce well-formed JSON.
+INSTRUMENT_INCLUDES='io.mosip.**:com.fasterxml.jackson.**:com.jayway.jsonpath.**'
+
 for fuzzer in $(find "$SRC" -maxdepth 1 -name '*Fuzzer.java'); do
   fuzzer_basename=$(basename -s .java "$fuzzer")
-  javac -cp $BUILD_CLASSPATH -d "$SRC" "$fuzzer"
-  cp "$SRC/$fuzzer_basename.class" "$OUT/"
 
   echo "#!/bin/bash
 this_dir=\$(dirname \"\$0\")
@@ -113,6 +142,7 @@ LD_LIBRARY_PATH=\"\$JAVA_HOME/lib/server\":\$this_dir \
 \$this_dir/jazzer_driver --agent_path=\$this_dir/jazzer_agent_deploy.jar \
 --cp=$RUNTIME_CLASSPATH \
 --target_class=$fuzzer_basename \
+--instrumentation_includes=\"$INSTRUMENT_INCLUDES\" \
 --jvm_args=\"-Xmx2048m:-Xss1024k:-Djava.awt.headless=true\" \
 \$@" > "$OUT/$fuzzer_basename"
   chmod +x "$OUT/$fuzzer_basename"

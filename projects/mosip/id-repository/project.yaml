@@ -13,6 +13,10 @@ sanitizers:
   - address
 
 fuzz_targets:
+  # Main fuzzers
+  - IdRepoControllerAddIdentityFuzzer
+  - IdRepoControllerUpdateIdentityFuzzer
+  # Smoke-test targets (pipeline verification only; see README)
   - HashFuzzer
   - HashWithSaltFuzzer
   - ValidateTypeFuzzer
