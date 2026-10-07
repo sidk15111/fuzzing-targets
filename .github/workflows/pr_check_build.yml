@@ -1,0 +1,81 @@
+name: PR check_build
+
+# PIPELINE 1 -- runs on every PR. Untrusted code, NO credentials:
+#
+#   detect -> validate -> check (one per project) -> check-build-gate
+#
+# Each step is a small building-block workflow; this file only wires them
+# together and decides the order. `needs:` makes a step wait for, and
+# depend on the success of, the ones before it.
+#
+# Keep this credential-free: no secrets, no `id-token: write`, and never
+# switch the trigger to `pull_request_target`. The GCP side independently
+# refuses tokens from PR runs (WIF condition pins them to refs/heads/main).
+#
+# No `paths:` filter on purpose: check-build-gate must report on EVERY PR
+# so it can be a required status check. A path-filtered workflow never
+# reports on non-matching PRs, and a required check that never reports
+# blocks them forever.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # 1. Which projects does this PR touch? Reads paths only; runs nothing.
+  detect:
+    uses: ./.github/workflows/detect_projects.yml
+    with:
+      base: ${{ github.event.pull_request.base.sha }}
+
+  # 2. Are those submissions valid? (Names are still checked against all.)
+  validate:
+    needs: detect
+    uses: ./.github/workflows/validate_projects.yml
+    with:
+      projects: ${{ needs.detect.outputs.projects }}
+      orphans: ${{ needs.detect.outputs.orphans }}
+
+  # 3. Only if valid: build each touched project and check_build it.
+  #    This is where the submitter's own code first runs.
+  check:
+    needs: [detect, validate]
+    if: needs.detect.outputs.projects != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        project_path: ${{ fromJson(needs.detect.outputs.projects) }}
+    uses: ./.github/workflows/check_project.yml
+    with:
+      project_path: ${{ matrix.project_path }}
+
+  # 4. The one stable-named job to mark as a required status check. It is
+  #    deliberately a plain job here, NOT a called workflow: a called
+  #    workflow's checks are named "<caller job> / <called job>", which would
+  #    change the name branch protection looks for.
+  check-build-gate:
+    needs: [detect, validate, check]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless detection, validation and every check_build passed
+        env:
+          DETECT_RESULT: ${{ needs.detect.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          CHECK_RESULT: ${{ needs.check.result }}
+        run: |
+          echo "detect: $DETECT_RESULT / validate: $VALIDATE_RESULT / check: $CHECK_RESULT"
+          if [ "$DETECT_RESULT" != "success" ]; then
+            echo "::error::Project detection did not succeed"
+            exit 1
+          fi
+          if [ "$VALIDATE_RESULT" != "success" ]; then
+            echo "::error::Submission validation failed -- nothing was built"
+            exit 1
+          fi
+          # "skipped" is fine here: no project was touched by this PR.
+          if [ "$CHECK_RESULT" = "failure" ] || [ "$CHECK_RESULT" = "cancelled" ]; then
+            echo "::error::check_build failed for at least one project in this PR"
+            exit 1
+          fi

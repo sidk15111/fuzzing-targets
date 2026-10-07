@@ -1,0 +1,70 @@
+name: Check project
+
+# BUILDING BLOCK -- one question: "does this ONE project build, and does
+# every declared fuzz target pass check_build?" Called once per project
+# (a matrix in the caller), on a throwaway GitHub-hosted runner.
+#
+# This executes the submitter's Dockerfile and build.sh -- untrusted code.
+# That is acceptable before approval only because of where it runs: a
+# runner holding nothing worth stealing. The workflow-level permissions
+# below are read-only, and a caller cannot raise them. Never add secrets or
+# `id-token: write` here.
+on:
+  workflow_call:
+    inputs:
+      project_path:
+        description: "Project directory, e.g. projects/acme/foo"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60  # bounds a hung or abusive build.sh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Build and check_build every declared fuzz target
+        env:
+          # Via env, never inline ${{ }} in the script: this value is a
+          # directory name the PR author fully controls.
+          PROJECT_PATH: ${{ inputs.project_path }}
+        run: |
+          set -euo pipefail
+          PROJECT_DIR="$GITHUB_WORKSPACE/$PROJECT_PATH"
+
+          eval "$(python3 - "$PROJECT_DIR/project.yaml" <<'PYEOF'
+          import sys, yaml, shlex
+          with open(sys.argv[1]) as f:
+              data = yaml.safe_load(f)
+          print(f"PROJECT={shlex.quote(data['name'])}")
+          print(f"ENGINES=({' '.join(shlex.quote(e) for e in data['fuzzing_engines'])})")
+          print(f"SANITIZERS=({' '.join(shlex.quote(s) for s in data['sanitizers'])})")
+          print(f"FUZZ_TARGETS=({' '.join(shlex.quote(t) for t in data['fuzz_targets'])})")
+          PYEOF
+          )"
+
+          git clone --depth 1 https://github.com/google/oss-fuzz.git "$RUNNER_TEMP/oss-fuzz"
+          ln -s "$PROJECT_DIR" "$RUNNER_TEMP/oss-fuzz/projects/$PROJECT"
+          cd "$RUNNER_TEMP/oss-fuzz"
+
+          # Same build + check_build core as build_and_upload.sh on the
+          # bot, minus the upload.
+          for ENGINE in "${ENGINES[@]}"; do
+            for SANITIZER in "${SANITIZERS[@]}"; do
+              docker build -t "gcr.io/oss-fuzz/$PROJECT" "projects/$PROJECT/"
+              python3 infra/helper.py build_fuzzers --clean \
+                --sanitizer "$SANITIZER" --engine "$ENGINE" "$PROJECT"
+
+              for TARGET in "${FUZZ_TARGETS[@]}"; do
+                echo "check_build: $PROJECT / $ENGINE-$SANITIZER / $TARGET"
+                python3 infra/helper.py check_build "$PROJECT" "$TARGET"
+              done
+            done
+          done

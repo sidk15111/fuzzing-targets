@@ -1,0 +1,59 @@
+name: Trigger build
+
+# PIPELINE 2 -- runs when main changes. Approved code, WITH credentials:
+#
+#   detect -> validate -> build (one bot per project)
+#
+# Same building blocks as the PR pipeline, plus build_bot.yml, which
+# provisions a temporary GCE bot, builds + check_builds + uploads, then
+# deletes the bot.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "projects/**"
+  workflow_dispatch:
+    inputs:
+      project_path:
+        description: "Specific project to build, e.g. projects/mosip/id-repository. Leave empty to auto-detect from the last push."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # 1. Which projects did this push touch? (A manual run can name one.)
+  detect:
+    uses: ./.github/workflows/detect_projects.yml
+    with:
+      base: ${{ github.event.before }}
+      override: ${{ inputs.project_path }}
+
+  # 2. Validate before spending money. Admin bypass can merge a PR whose
+  #    checks were red, and a bad project path would otherwise flow into an
+  #    SSH command on the build bot.
+  validate:
+    needs: detect
+    uses: ./.github/workflows/validate_projects.yml
+    with:
+      projects: ${{ needs.detect.outputs.projects }}
+      orphans: ${{ needs.detect.outputs.orphans }}
+
+  # 3. Only if valid: one bot per touched project.
+  call-build:
+    needs: [detect, validate]
+    if: needs.detect.outputs.projects != '[]'
+    strategy:
+      fail-fast: false  # one project failing shouldn't cancel another's build
+      matrix:
+        project_path: ${{ fromJson(needs.detect.outputs.projects) }}
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/build_bot.yml
+    with:
+      project_path: ${{ matrix.project_path }}
+      # Dynamic rather than hardcoded -- stays correct if this repo is
+      # ever renamed or transferred to another owner.
+      repo_url: ${{ github.server_url }}/${{ github.repository }}.git
