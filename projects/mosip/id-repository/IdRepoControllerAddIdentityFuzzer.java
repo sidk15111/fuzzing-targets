@@ -18,11 +18,21 @@ import com.code_intelligence.jazzer.api.FuzzedDataProvider;
  */
 public class IdRepoControllerAddIdentityFuzzer {
 
-    // Built once per process. Also runs a start-up self-check and fails
-    // loudly if the harness wiring is wrong.
-    private static final MockMvc MVC = IdRepoFuzzSupport.newMockMvc(false);
+    private static MockMvc mvc;
+
+    /**
+     * Jazzer calls this once, BEFORE libFuzzer starts its first unit. The
+     * set-up is expensive (Spring MVC, Mockito, the start-up self-check, and
+     * Jazzer instrumenting hundreds of freshly loaded classes), so it must not
+     * happen lazily inside fuzzerTestOneInput: libFuzzer's 25-second per-unit
+     * timeout would then count it against the very first input. That is
+     * exactly what failed check_build on the slower build bot.
+     */
+    public static void fuzzerInitialize() {
+        mvc = IdRepoFuzzSupport.newMockMvc(false);
+    }
 
     public static void fuzzerTestOneInput(FuzzedDataProvider data) {
-        IdRepoFuzzSupport.fuzz(MVC, false, data.consumeRemainingAsBytes());
+        IdRepoFuzzSupport.fuzz(mvc, false, data.consumeRemainingAsBytes());
     }
 }

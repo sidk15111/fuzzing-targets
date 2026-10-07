@@ -60,6 +60,12 @@ written for them.
   parse errors, Spring MVC client errors). Anything else (NPE,
   ClassCastException, ...) is a finding, reported with its original stack
   trace.
+- **Start-up work happens in `fuzzerInitialize()`, not lazily.** Building the
+  MockMvc is slow (Spring MVC, Mockito, Jazzer instrumenting hundreds of newly
+  loaded classes). Jazzer runs `fuzzerInitialize()` before libFuzzer's first
+  unit, so it is not charged against libFuzzer's 25-second per-unit timeout.
+  Done lazily it would be, and on a slower machine (the build bot, the
+  ClusterFuzz bots) the very first input times out.
 - **Start-up self-check.** On start, each harness sends one known-valid
   request and fails loudly if it does not reach the faked service. A
   mis-wired harness would otherwise look like a healthy fuzzer that simply
