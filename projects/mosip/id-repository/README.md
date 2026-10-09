@@ -4,21 +4,15 @@ Jazzer targets against MOSIP's `id-repository`, laid out the same way
 `vulnfuzz`/`vulnjava` are: this directory is its own small repo, meant to be
 symlinked into a local OSS-Fuzz checkout as `projects/id-repository/`.
 
-There are two groups of targets here, and they are not equal:
-
-- **Main fuzzers** -- the real bug-hunting harnesses. All current work is
-  focused on these. See the next section.
-- **Smoke-test targets** -- five minimal harnesses that only prove the
-  build/ClusterFuzz pipeline works for a Jazzer project. They are listed at
-  the bottom of this file, are not expected to find bugs, and are not where
-  new effort goes.
+The targets here are the controller-level harnesses described below. The five
+original smoke-test harnesses that proved the pipeline have been retired.
 
 ## Main fuzzers
 
 | Harness | Entry point | How it runs | Faked | Status |
 |---|---|---|---|---|
-| `IdRepoControllerAddIdentityFuzzer` | `IdRepoController.addIdentity` (POST `/`) | Spring MVC standalone `MockMvc`: real Jackson binding, `IdRequestValidator`, controller, exception handler | service layer, audit, UIN checksum, kernel schema validation | written, not yet built or run |
-| `IdRepoControllerUpdateIdentityFuzzer` | `IdRepoController.updateIdentity` (PATCH `/`) | same as above | same as above | written, not yet built or run |
+| `IdRepoControllerAddIdentityFuzzer` | `IdRepoController.addIdentity` (POST `/`) | Spring MVC standalone `MockMvc`: real Jackson binding, `IdRequestValidator`, controller, exception handler | service layer, audit, UIN checksum, kernel schema validation | running on ClusterFuzz; known issue filtered (see Known issues) |
+| `IdRepoControllerUpdateIdentityFuzzer` | `IdRepoController.updateIdentity` (PATCH `/`) | same as above | same as above | running on ClusterFuzz; known issue filtered (see Known issues) |
 | `IdRepoServiceUpdateIdentityFuzzer` | `IdRepoServiceImpl.updateIdentity` | plain objects, no web layer | repositories (fuzz-driven fakes) and other collaborators | planned |
 
 All three are in module `id-repository-identity-service`. Only two of
@@ -79,6 +73,31 @@ written for them.
   `requesttime` is checked against a deliberately widened window, because
   seeds are static files.
 
+### Known issues (filtered by the oracle)
+
+A bug that is already reported upstream but still present in MOSIP master can
+sit at the front door of every request and end each fuzzing session within
+minutes, hiding everything deeper. Such bugs are listed in
+`IdRepoFuzzSupport.matchKnownIssue`; the oracle skips them, counts them, and
+prints one line per process the first time one is hit.
+
+| Id | What | Upstream report |
+|---|---|---|
+| `validator-null-request` | `IdRequestValidator.validate()` dereferences `request.getRequest()` without a null check, so a body with no `request` object throws `NullPointerException` | _add link when filed_ |
+
+Rules for this list:
+
+- Add an entry only **after** the bug has been reported, and match on exception
+  type, throwing method and message, not on line numbers.
+- Delete the entry when upstream fixes the bug, so a regression is caught again.
+- ClusterFuzz re-tests an open testcase against each new build. Once the entry
+  suppresses the crash, ClusterFuzz will mark that testcase "fixed". That means
+  "no longer reproduces in our harness", not "MOSIP fixed it".
+- The wrapper script runs the JVM with `-XX:-OmitStackTraceInFastThrow`. HotSpot
+  can strip the message and stack from a `NullPointerException` thrown many
+  times, which would make a match impossible. A stripped exception is not
+  matched, so it surfaces as a finding instead of being hidden.
+
 ### Naming convention
 
 New harnesses are named `<Surface><Operation>Fuzzer`
@@ -91,7 +110,6 @@ New harnesses are named `<Surface><Operation>Fuzzer`
   `seeds/<Name>/` (`build.sh` zips every seeds directory that has a matching
   harness).
 - List every harness in `fuzz_targets` in `project.yaml`.
-- Existing smoke-test harnesses keep their current names.
 
 ## Local testing
 
@@ -139,28 +157,3 @@ Jazzer-instrumented JVM -- no Spring application context boots, no port
 opens, no config server or Postgres is ever contacted. We only need the
 plain `.jar` that `mvn package` produces, several build phases before that
 Dockerfile would even be relevant.
-
----
-
-## Smoke-test targets (pipeline verification only -- not the focus)
-
-These five were the first batch. Their job was to prove that the whole path
-works for a Jazzer project: clone MOSIP, build with Maven, `check_build`, and
-run under ClusterFuzz. They target small utility methods with little
-branching -- thin wrappers over JDK hashing, validators with a handful of
-branches, and a lookup against a mock that always returns "not found" -- so
-they are **not expected to find bugs**, and no new work should go into them.
-
-Once the real ClusterFuzz job has been confirmed running them, they are
-candidates for retirement (each target takes a share of fuzzing time).
-
-| Harness | Module | Method under test | Mocking |
-|---|---|---|---|
-| `HashFuzzer` | id-repository-core | `IdRepoSecurityManager.hash(byte[])` | none |
-| `HashWithSaltFuzzer` | id-repository-core | `IdRepoSecurityManager.hashwithSalt(byte[], byte[])` | none |
-| `ValidateTypeFuzzer` | id-repository-identity-service | `IdRequestValidator.validateType(String)` | none |
-| `ValidateIdTypeFuzzer` | id-repository-identity-service | `IdRequestValidator.validateIdType(String)` | none |
-| `RetrieveIdentityFuzzer` | id-repository-identity-service | `IdRepoServiceImpl.retrieveIdentity(...)` | Mockito (`UinRepo`) |
-
-`ValidateTypeFuzzer` and `ValidateIdTypeFuzzer` also ship a `.dict` file and a
-seed corpus; the other three have neither.
