@@ -240,16 +240,31 @@ public final class IdRepoFuzzSupport {
         } catch (Exception e) {
             // Escaped even the exception handler. Spring wraps the real
             // cause in a ServletException, so report the cause.
-            Throwable cause = e.getCause() != null ? e.getCause() : e;
-            if (!isExpected(cause)) {
-                throw sneakyThrow(cause);
-            }
+            report(e.getCause() != null ? e.getCause() : e);
             return;
         }
         Exception resolved = result.getResolvedException();
-        if (resolved != null && !isExpected(resolved)) {
-            throw sneakyThrow(resolved);
+        if (resolved != null) {
+            report(resolved);
         }
+    }
+
+    /**
+     * Decides what to do with one exception raised in the request path:
+     * ignore it if it is intended behaviour, ignore it (and count it) if it
+     * is a known, already-reported bug, otherwise rethrow it so Jazzer
+     * records a finding.
+     */
+    private static void report(Throwable t) {
+        if (isExpected(t)) {
+            return;
+        }
+        String knownIssue = matchKnownIssue(t);
+        if (knownIssue != null) {
+            noteKnownIssue(knownIssue);
+            return;
+        }
+        throw sneakyThrow(t);
     }
 
     private static MvcResult send(MockMvc mvc, boolean update, byte[] body) throws Exception {
@@ -275,6 +290,56 @@ public final class IdRepoFuzzSupport {
                 || t instanceof IdRepoAppUncheckedException
                 || t instanceof HttpMessageNotReadableException
                 || t instanceof ErrorResponse;
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Known issues                                                        //
+    // ------------------------------------------------------------------ //
+
+    // A bug that has already been triaged and reported upstream, but is still
+    // present in MOSIP master. It sits at the front door of every request, so
+    // left unfiltered it ends every fuzzing session within minutes and hides
+    // anything deeper. While it is listed here the fuzzer skips it and keeps
+    // going. Add an entry ONLY after the bug has been reported, and delete the
+    // entry once upstream fixes it, so that a regression is caught again.
+    //
+    // Entry "validator-null-request":
+    //   IdRequestValidator.validate() calls request.getRequest().<something>
+    //   without checking that "request" is present, so a body with no
+    //   "request" object throws NullPointerException (lines 180/183/189 in
+    //   master at the time of writing). Matched on exception type, the
+    //   throwing method, and the null being the result of getRequest() --
+    //   NOT on line numbers, which drift whenever upstream edits the file.
+    private static final String KNOWN_NULL_REQUEST = "validator-null-request";
+
+    private static long knownIssueHits;
+
+    /** Returns the id of the known issue this exception is, or null. */
+    private static String matchKnownIssue(Throwable t) {
+        if (t instanceof NullPointerException) {
+            StackTraceElement[] stack = t.getStackTrace();
+            // Needs a stack trace and a message. The JVM's "fast throw"
+            // optimization can strip both from a NullPointerException that
+            // has been thrown many times; the wrapper script disables it
+            // (-XX:-OmitStackTraceInFastThrow). If it ever sneaks back in,
+            // the exception is deliberately NOT matched and shows up as an
+            // un-triageable finding, which is the loud failure we want.
+            if (stack.length > 0 && t.getMessage() != null
+                    && "io.mosip.idrepository.identity.validator.IdRequestValidator"
+                            .equals(stack[0].getClassName())
+                    && "validate".equals(stack[0].getMethodName())
+                    && t.getMessage().contains("IdRequestDTO.getRequest()")) {
+                return KNOWN_NULL_REQUEST;
+            }
+        }
+        return null;
+    }
+
+    private static void noteKnownIssue(String id) {
+        if (knownIssueHits++ == 0) {
+            System.err.println("IdRepoFuzzSupport: skipping known issue '" + id
+                    + "' (see README, Known issues). Further hits are counted silently.");
+        }
     }
 
     // Rethrows the ORIGINAL exception (class and stack trace intact) without

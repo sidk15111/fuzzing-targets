@@ -143,7 +143,7 @@ LD_LIBRARY_PATH=\"\$JAVA_HOME/lib/server\":\$this_dir \
 --cp=$RUNTIME_CLASSPATH \
 --target_class=$fuzzer_basename \
 --instrumentation_includes=\"$INSTRUMENT_INCLUDES\" \
---jvm_args=\"-Xmx2048m:-Xss1024k:-Djava.awt.headless=true\" \
+--jvm_args=\"-Xmx2048m:-Xss1024k:-Djava.awt.headless=true:-XX:-OmitStackTraceInFastThrow\" \
 \$@" > "$OUT/$fuzzer_basename"
   chmod +x "$OUT/$fuzzer_basename"
 done
