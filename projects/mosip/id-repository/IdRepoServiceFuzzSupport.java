@@ -72,8 +72,9 @@ import io.mosip.kernel.biometrics.spi.CbeffUtil;
  *
  * What counts as a finding:
  *   1. Any exception other than IdRepoAppException / IdRepoAppUncheckedException
- *      (MOSIP's own, intended error types): NullPointerException,
- *      ClassCastException, JsonPath exceptions escaping, and so on.
+ *      (MOSIP's own, intended error types) and the known issues listed in
+ *      IdRepoKnownIssues: NullPointerException, ClassCastException, JsonPath
+ *      exceptions escaping, and so on.
  *   2. A broken property after a SUCCESSFUL update (see checkProperties):
  *      the stored record is no longer a JSON object, its hash does not match,
  *      or an attribute the request did NOT name was changed, added or lost.
@@ -244,6 +245,11 @@ public final class IdRepoServiceFuzzSupport {
         } catch (RuntimeException e) {
             if (e instanceof IdRepoAppUncheckedException) {
                 return; // intended business error
+            }
+            String knownIssue = IdRepoKnownIssues.match(e);
+            if (knownIssue != null) {
+                IdRepoKnownIssues.note(knownIssue); // already reported upstream
+                return;
             }
             throw e; // anything else is a finding, with its original stack trace
         }

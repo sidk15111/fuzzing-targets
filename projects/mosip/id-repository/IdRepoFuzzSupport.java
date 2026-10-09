@@ -259,9 +259,9 @@ public final class IdRepoFuzzSupport {
         if (isExpected(t)) {
             return;
         }
-        String knownIssue = matchKnownIssue(t);
+        String knownIssue = IdRepoKnownIssues.match(t);
         if (knownIssue != null) {
-            noteKnownIssue(knownIssue);
+            IdRepoKnownIssues.note(knownIssue);
             return;
         }
         throw sneakyThrow(t);
@@ -292,55 +292,8 @@ public final class IdRepoFuzzSupport {
                 || t instanceof ErrorResponse;
     }
 
-    // ------------------------------------------------------------------ //
-    //  Known issues                                                        //
-    // ------------------------------------------------------------------ //
-
-    // A bug that has already been triaged and reported upstream, but is still
-    // present in MOSIP master. It sits at the front door of every request, so
-    // left unfiltered it ends every fuzzing session within minutes and hides
-    // anything deeper. While it is listed here the fuzzer skips it and keeps
-    // going. Add an entry ONLY after the bug has been reported, and delete the
-    // entry once upstream fixes it, so that a regression is caught again.
-    //
-    // Entry "validator-null-request":
-    //   IdRequestValidator.validate() calls request.getRequest().<something>
-    //   without checking that "request" is present, so a body with no
-    //   "request" object throws NullPointerException (lines 180/183/189 in
-    //   master at the time of writing). Matched on exception type, the
-    //   throwing method, and the null being the result of getRequest() --
-    //   NOT on line numbers, which drift whenever upstream edits the file.
-    private static final String KNOWN_NULL_REQUEST = "validator-null-request";
-
-    private static long knownIssueHits;
-
-    /** Returns the id of the known issue this exception is, or null. */
-    private static String matchKnownIssue(Throwable t) {
-        if (t instanceof NullPointerException) {
-            StackTraceElement[] stack = t.getStackTrace();
-            // Needs a stack trace and a message. The JVM's "fast throw"
-            // optimization can strip both from a NullPointerException that
-            // has been thrown many times; the wrapper script disables it
-            // (-XX:-OmitStackTraceInFastThrow). If it ever sneaks back in,
-            // the exception is deliberately NOT matched and shows up as an
-            // un-triageable finding, which is the loud failure we want.
-            if (stack.length > 0 && t.getMessage() != null
-                    && "io.mosip.idrepository.identity.validator.IdRequestValidator"
-                            .equals(stack[0].getClassName())
-                    && "validate".equals(stack[0].getMethodName())
-                    && t.getMessage().contains("IdRequestDTO.getRequest()")) {
-                return KNOWN_NULL_REQUEST;
-            }
-        }
-        return null;
-    }
-
-    private static void noteKnownIssue(String id) {
-        if (knownIssueHits++ == 0) {
-            System.err.println("IdRepoFuzzSupport: skipping known issue '" + id
-                    + "' (see README, Known issues). Further hits are counted silently.");
-        }
-    }
+    // Known, already-reported bugs are listed in IdRepoKnownIssues (shared with
+    // the service-level harness). See that class for the rules.
 
     // Rethrows the ORIGINAL exception (class and stack trace intact) without
     // declaring it, so Jazzer's report and de-duplication point at the real
