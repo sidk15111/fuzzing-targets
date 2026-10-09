@@ -13,7 +13,7 @@ original smoke-test harnesses that proved the pipeline have been retired.
 |---|---|---|---|---|
 | `IdRepoControllerAddIdentityFuzzer` | `IdRepoController.addIdentity` (POST `/`) | Spring MVC standalone `MockMvc`: real Jackson binding, `IdRequestValidator`, controller, exception handler | service layer, audit, UIN checksum, kernel schema validation | running on ClusterFuzz; known issue filtered (see Known issues) |
 | `IdRepoControllerUpdateIdentityFuzzer` | `IdRepoController.updateIdentity` (PATCH `/`) | same as above | same as above | running on ClusterFuzz; known issue filtered (see Known issues) |
-| `IdRepoServiceUpdateIdentityFuzzer` | `IdRepoServiceImpl.updateIdentity` | plain objects, no web layer | repositories (fuzz-driven fakes) and other collaborators | planned |
+| `IdRepoServiceUpdateIdentityFuzzer` | `IdRepoServiceImpl.updateIdentity` | plain objects, no web layer; the real service runs | every repository (the stored record comes from the fuzz input), object store, CBEFF, anonymous-profile helper | written, not yet built or run |
 
 All three are in module `id-repository-identity-service`. Only two of
 id-repository's six Maven modules are built so far (`id-repository-core`,
@@ -25,14 +25,18 @@ written for them.
 
 - `IdRepoControllerAddIdentityFuzzer.java`,
   `IdRepoControllerUpdateIdentityFuzzer.java` -- the fuzz targets (thin).
+- `IdRepoServiceUpdateIdentityFuzzer.java` and `IdRepoServiceFuzzSupport.java` --
+  the service-level harness and its wiring (see "Service-level harness").
 - `IdRepoFuzzSupport.java` -- shared wiring, faked I/O edges, crash oracle and
-  start-up self-check. Not a fuzz target: its name deliberately does not end
+  start-up self-check for the controller harnesses. Not a fuzz target: its name deliberately does not end
   in `Fuzzer`, so it is never wrapped or listed in `project.yaml`.
 - `<Name>.dict` and `seeds/<Name>/` -- dictionary and seed corpus per target.
   Seeds are valid (and a few deliberately-rejected) request bodies built from
   MOSIP's own test data.
 - `fixtures/identity-mapping.json` -- MOSIP's identity-mapping file, copied
   from their test resources and loaded as a classpath resource.
+- `fixtures/identity-stored.json` -- MOSIP's sample identity, used as the default
+  stored record by the service-level harness.
 
 ### Design notes
 
@@ -72,6 +76,48 @@ written for them.
   other services, and Spring Security (authorization is not fuzzed).
   `requesttime` is checked against a deliberately widened window, because
   seeds are static files.
+
+### Service-level harness
+
+`IdRepoServiceUpdateIdentityFuzzer` runs the real `IdRepoServiceImpl.updateIdentity`
+and fakes what sits behind it. The controller harnesses fake this layer and run
+the controller instead, so the two cover different code.
+
+**Input format:** `[request identity JSON] 0x00 [stored identity JSON]`. Everything
+before the first NUL byte is the identity object the client sends; everything
+after is the record already in the database. With no NUL byte a default stored
+record (`fixtures/identity-stored.json`) is used. Seeds in
+`seeds/IdRepoServiceUpdateIdentityFuzzer/` are binary because of the separator.
+
+**What counts as a finding:**
+
+1. Any exception other than MOSIP's own `IdRepoAppException` /
+   `IdRepoAppUncheckedException` (NullPointerException, ClassCastException, a
+   JsonPath exception escaping, ...).
+2. A broken property after a *successful* update: the stored record is no
+   longer a JSON object, its hash does not match, or a top-level attribute the
+   request did not name was changed, removed or added (`verifiedAttributes` is
+   exempt; the service manages it).
+
+**Why the property check exists.** The merge logic builds JsonPath expressions
+from key names in the request (splitting on dots, rewriting brackets and `=`),
+so a crafted key could make it write somewhere the request did not point. That
+is data corruption, not a crash, and only a property check can see it.
+
+**Reading the code suggests two things to look at first** (hypotheses, not
+confirmed): `updateRequestBodyData` runs with `trim-whitespaces` defaulting to
+true and casts attribute values without checking their shape, and uses
+`Collectors.toMap`, which throws on null values; and the key-name-to-JsonPath
+handling above.
+
+**Reachability caveat.** This harness calls the service directly, bypassing the
+controller's validation and the schema validator. A finding here is a
+*candidate*. Before reporting, check whether the real request path could deliver
+that input to the service.
+
+**Seeds must not crash.** They were written from MOSIP's own sample data but
+have not been run. Move any seed that triggers a finding out of the seeds
+directory and reproduce it from the crash artifact instead.
 
 ### Known issues (filtered by the oracle)
 
