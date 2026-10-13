@@ -16,6 +16,7 @@ fuzz_targets:
   # Main fuzzers
   - IdRepoControllerAddIdentityFuzzer
   - IdRepoControllerUpdateIdentityFuzzer
+  - IdRepoServiceUpdateIdentityFuzzer
   # Smoke-test targets (pipeline verification only; see README)
   #- HashFuzzer
   #- HashWithSaltFuzzer
