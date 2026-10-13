@@ -131,6 +131,12 @@ public final class IdRepoKnownIssues {
     // can reach the service. This is an ASSUMPTION; see README, "Input domain".
     private static final Pattern ATTRIBUTE_NAME = Pattern.compile("[A-Za-z][A-Za-z0-9_]{0,63}");
 
+    // Field names that occur inside an attribute's object in MOSIP's sample identity
+    // schemas (simpleType, documentType, biometricsType). The schemas set
+    // additionalProperties:false, so no other field name can reach the service.
+    private static final java.util.Set<String> NESTED_FIELDS = new java.util.HashSet<>(java.util.Arrays.asList(
+            "language", "value", "type", "format", "version", "fileReference", "label"));
+
     // Language codes are three lowercase letters (eng, ara, fra), not free text.
     private static final Pattern LANGUAGE_CODE = Pattern.compile("[a-z]{3}");
 
@@ -143,38 +149,106 @@ public final class IdRepoKnownIssues {
     }
 
     /**
-     * True if a parsed request identity stays inside the harness's input
-     * domain: every key at any depth is an attribute name, and every "language"
-     * value is a language code. Attribute VALUES are deliberately not
-     * restricted (names such as "O'Brien" are realistic).
+     * True if a parsed identity (the request's, or the stored record) follows the
+     * shapes that MOSIP's own sample identity schemas allow:
+     *
+     *   - every top-level attribute name matches ATTRIBUTE_NAME, and the fields inside
+     *     an attribute's object are limited to the ones the sample schemas define
+     *     (NESTED_FIELDS);
+     *   - a top-level attribute is a scalar (string, number, boolean; never
+     *     null), an object, or an array of objects;
+     *   - those objects ("simpleType", "documentType", "biometricsType" in the
+     *     sample schemas) hold scalars only, have a string "value", and a
+     *     "language", if present, is a language code;
+     *   - exceptions: "selectedHandles" may also be an array of strings, and
+     *     "verifiedAttributes" is allowed only in the STORED record, as an array
+     *     of strings (in a real request it is a sibling field of the identity).
+     *
+     * Attribute VALUES stay free text (names such as "O'Brien" are realistic).
+     * This is an assumption modelled on the sample schemas, not the deployed one;
+     * see README, "Input domain".
      */
     static boolean looksLikeRealIdentity(Object root) {
-        Deque<Object> pending = new ArrayDeque<>();
-        if (root != null) {
-            pending.push(root);
+        return looksLikeRealIdentity(root, false);
+    }
+
+    static boolean looksLikeRealIdentity(Object root, boolean storedRecord) {
+        if (!(root instanceof Map)) {
+            return false;
         }
-        while (!pending.isEmpty()) {
-            Object node = pending.pop();
-            if (node instanceof Map) {
-                for (Map.Entry<?, ?> entry : ((Map<?, ?>) node).entrySet()) {
-                    if (!(entry.getKey() instanceof String) || !isAttributeName((String) entry.getKey())) {
-                        return false;
-                    }
-                    Object value = entry.getValue();
-                    if ("language".equals(entry.getKey()) && value instanceof String
-                            && !isLanguageCode((String) value)) {
-                        return false;
-                    }
-                    if (value != null) {
-                        pending.push(value);
-                    }
+        for (Map.Entry<?, ?> top : ((Map<?, ?>) root).entrySet()) {
+            if (!(top.getKey() instanceof String) || !isAttributeName((String) top.getKey())) {
+                return false;
+            }
+            String name = (String) top.getKey();
+            Object value = top.getValue();
+            if ("verifiedAttributes".equals(name)) {
+                if (!storedRecord || !isListOfStrings(value)) {
+                    return false;
                 }
-            } else if (node instanceof List) {
-                for (Object element : (List<?>) node) {
-                    if (element != null) {
-                        pending.push(element);
-                    }
+            } else if ("selectedHandles".equals(name)) {
+                if (!(value instanceof List)) {
+                    return false; // by definition a list; a bare number or object is not a handle list
                 }
+                if (!isListOfStrings(value) && !isListOfValueObjects(value)) {
+                    return false;
+                }
+            } else if (isScalar(value)) {
+                continue;
+            } else if (value instanceof Map) {
+                if (!isValueObject((Map<?, ?>) value)) {
+                    return false;
+                }
+            } else if (value instanceof List) {
+                if (!isListOfValueObjects(value)) {
+                    return false;
+                }
+            } else {
+                return false; // null, or anything else
+            }
+        }
+        return true;
+    }
+
+    private static boolean isScalar(Object value) {
+        return value instanceof String || value instanceof Number || value instanceof Boolean;
+    }
+
+    private static boolean isListOfStrings(Object value) {
+        if (!(value instanceof List)) {
+            return false;
+        }
+        for (Object element : (List<?>) value) {
+            if (!(element instanceof String)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isListOfValueObjects(Object value) {
+        for (Object element : (List<?>) value) {
+            if (!(element instanceof Map) || !isValueObject((Map<?, ?>) element)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // An object inside an attribute: scalar fields only, a string "value", and a
+    // "language", when present, that is a language code.
+    private static boolean isValueObject(Map<?, ?> object) {
+        if (!(object.get("value") instanceof String)) {
+            return false;
+        }
+        for (Map.Entry<?, ?> field : object.entrySet()) {
+            if (!(field.getKey() instanceof String) || !NESTED_FIELDS.contains(field.getKey())
+                    || !isScalar(field.getValue())) {
+                return false;
+            }
+            if ("language".equals(field.getKey())
+                    && !(field.getValue() instanceof String && isLanguageCode((String) field.getValue()))) {
+                return false;
             }
         }
         return true;

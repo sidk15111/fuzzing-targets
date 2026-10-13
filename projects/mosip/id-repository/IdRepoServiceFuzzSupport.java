@@ -10,10 +10,8 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Deque;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -254,7 +252,6 @@ public final class IdRepoServiceFuzzSupport {
         // (README, "Input domain"). Without this the fuzzer keeps finding one
         // root cause in new forms: attribute names used unescaped in JsonPath.
         if (!IdRepoKnownIssues.looksLikeRealIdentity(identity)
-                || identity.containsKey(VERIFIED_ATTRIBUTES) // a sibling field of the request, service-managed
                 || !storedLooksPlausible(before)) {
             return;
         }
@@ -318,44 +315,17 @@ public final class IdRepoServiceFuzzSupport {
         }
     }
 
-    // The stored record was written by the service earlier, so it has real
-    // attribute names, language codes, and verifiedAttributes as a list of strings.
+    // The stored record was written by the service earlier, from a request that
+    // passed schema validation, so it follows the same shapes as a real request
+    // (plus the service-managed verifiedAttributes). Crashes caused by an
+    // impossible stored shape, such as an array of strings where the schema
+    // requires objects, are not bugs a client can trigger.
     private static boolean storedLooksPlausible(JsonNode stored) {
-        JsonNode verified = stored.get(VERIFIED_ATTRIBUTES);
-        if (verified != null) {
-            if (!verified.isArray()) {
-                return false;
-            }
-            for (JsonNode element : verified) {
-                if (!element.isTextual()) {
-                    return false;
-                }
-            }
+        try {
+            return IdRepoKnownIssues.looksLikeRealIdentity(MAPPER.convertValue(stored, Object.class), true);
+        } catch (IllegalArgumentException e) {
+            return false;
         }
-        Deque<JsonNode> pending = new ArrayDeque<>();
-        pending.push(stored);
-        while (!pending.isEmpty()) {
-            JsonNode node = pending.pop();
-            if (node.isObject()) {
-                Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
-                while (fields.hasNext()) {
-                    Map.Entry<String, JsonNode> field = fields.next();
-                    if (!IdRepoKnownIssues.isAttributeName(field.getKey())) {
-                        return false;
-                    }
-                    if ("language".equals(field.getKey()) && field.getValue().isTextual()
-                            && !IdRepoKnownIssues.isLanguageCode(field.getValue().asText())) {
-                        return false;
-                    }
-                    pending.push(field.getValue());
-                }
-            } else if (node.isArray()) {
-                for (JsonNode child : node) {
-                    pending.push(child);
-                }
-            }
-        }
-        return true;
     }
 
     private static boolean isValidUtf8(byte[] bytes) {
@@ -425,6 +395,17 @@ public final class IdRepoServiceFuzzSupport {
             throw new AssertionError("Stored data hash does not match the stored data after an update");
         }
 
+        // Compare against the stored record AS THE SERVICE WOULD WRITE IT. The
+        // service serializes the record with this mapper, and a round trip is
+        // not always the identity: a number too large for a double (1e999) is
+        // read as Infinity and written back as the STRING "Infinity", which
+        // prints identically but is a different JSON type. That is Jackson's
+        // behavior, not a change made by the merge, so it must not count.
+        JsonNode writtenBefore = normalizeLikeService(before);
+        if (writtenBefore == null) {
+            return; // cannot be serialized the way the service does; nothing to compare
+        }
+
         Iterator<String> names = before.fieldNames();
         while (names.hasNext()) {
             String name = names.next();
@@ -432,7 +413,7 @@ public final class IdRepoServiceFuzzSupport {
                 continue;
             }
             JsonNode now = after.get(name);
-            if (now == null || !now.equals(before.get(name))) {
+            if (now == null || !now.equals(writtenBefore.get(name))) {
                 String what = now == null ? "REMOVED" : now.isNull() ? "SET TO NULL" : "CHANGED";
                 throw new AssertionError("Attribute '" + escape(name) + "' was " + what + " although the request did "
                         + "not name it. before=" + abbreviate(before.get(name)) + " after="
@@ -447,6 +428,14 @@ public final class IdRepoServiceFuzzSupport {
                 throw new AssertionError("Attribute '" + escape(name) + "' was CREATED although the request did not "
                         + "name it. value=" + abbreviate(after.get(name)));
             }
+        }
+    }
+
+    private static JsonNode normalizeLikeService(JsonNode node) {
+        try {
+            return MAPPER.readTree(MAPPER.writeValueAsBytes(node));
+        } catch (IOException e) {
+            return null;
         }
     }
 

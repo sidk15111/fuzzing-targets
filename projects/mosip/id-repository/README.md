@@ -129,15 +129,30 @@ assumptions:
 
 - every attribute name, at any depth, in the request and in the stored record
   matches `[A-Za-z][A-Za-z0-9_]{0,63}`;
-- every `language` value is three lowercase letters (`eng`, `ara`, `fra`);
-- the request identity has no `verifiedAttributes` key (in the real API it is a
-  sibling field of the request, managed by the service);
-- in the stored record, `verifiedAttributes`, if present, is an array of strings;
-- the stored record's bytes are valid UTF-8. The service decodes the record with `new String(bytes)`, which turns an invalid byte into `U+FFFD`, so a record with invalid bytes is silently rewritten by the service. The harness checks this before any JSON parse and reads the record the same way the service does, so its "before" picture always agrees with the service's.
+- the **shapes** follow MOSIP's own sample identity schemas, for the request and
+  for the stored record alike: a top-level attribute is a scalar (string, number,
+  boolean, never `null`), an object, or an array of objects; those objects hold
+  scalars only, have a string `value`, and a `language`, if present, is three
+  lowercase letters (`eng`, `ara`, `fra`);
+- the fields inside an attribute's object are limited to the ones the sample schemas define (`language`, `value`, `type`, `format`, `version`, `fileReference`, `label`), and `selectedHandles` must be a list;
+- exceptions to the shapes: `selectedHandles` may also be an array of strings,
+  and `verifiedAttributes` is allowed only in the **stored** record, as an array
+  of strings (in a real request it is a sibling field of the identity, managed by
+  the service);
+- the stored record's bytes are valid UTF-8. The service decodes the record with `new String(bytes)`,
+  which turns an invalid byte into `U+FFFD`, so a record with invalid bytes is silently rewritten by
+  the service. The harness checks this before any JSON parse and reads the record the same way the
+  service does, so its "before" picture always agrees with the service's.
 
 **Not** restricted: attribute *values* (names such as `O'Brien` are realistic
 and are the kind of input the merge logic may mishandle), array lengths, and
 which attributes are present.
+
+**Why nested field names and `selectedHandles` are restricted:** a later soak crashed with a message-less `PathNotFoundException` (JsonPath throws it from `set`, `add` and `put` when the path matches nothing). The input used an object field `langue` (no sample schema has it) and a 21-digit number as `selectedHandles`. MOSIP builds the filter path in `updateFailingFields` by **global text replacement** (`[` becomes `[?(@.`, `=` becomes `=='`, `]` becomes `')]`), so when the value that identifies an array element contains one of those characters, the rewritten path matches nothing. With the real field `language` the identifying value is a three-letter code and cannot contain them. It could still happen if an element is identified by its free-text `value` (the first key of the request element, when `language` comes second). That is **an open question, not a confirmed bug**: see `experiments/`, three small inputs to check it on the real code.
+
+**Why the shape rule exists:** an earlier soak crashed in `updateMissingValues` with a `ClassCastException`. The stored record held `"residenceStatus":["x","y"]`, an array of plain strings, while the request had objects; the merge reads the stored list as a list of objects. A real record cannot look like that: the service only stores requests that passed schema validation, and the schema requires objects for that attribute. It shows the merge code is not defensive about corrupted stored data, which is a robustness observation, not something a client can trigger.
+
+**Why the oracle compares against the record "as the service would write it":** a later soak reported "attribute `ye` was CHANGED although the request did not name it" with `before="Infinity" after="Infinity"`. The stored record held `"ye":44444e754444444152`, a number too large for a double. Jackson reads it as `Infinity` and writes it back as the **string** `"Infinity"`, which prints identically but is a different JSON type. That is Jackson's own round trip, not a change made by the merge. The property check now compares against the stored record after the same round trip, which removes this whole class of representation differences (number spellings, non-finite numbers) while still catching a changed, removed, nulled or invented attribute.
 
 **Why the UTF-8 rule exists:** an earlier soak reported "attribute `postalCoe` was changed although the request did not name it". The stored bytes held a raw `0xFF` inside that attribute name. The service turned it into `U+FFFD` while the oracle's byte-level parse produced a different name, so the two disagreed about the record, not because the merge lost data. Production records are valid UTF-8, so this was a harness artifact, not a MOSIP bug.
 
