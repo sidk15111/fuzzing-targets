@@ -4,11 +4,16 @@ import static org.mockito.Mockito.withSettings;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -226,16 +231,37 @@ public final class IdRepoServiceFuzzSupport {
         byte[] requestBytes = sep < 0 ? input : Arrays.copyOfRange(input, 0, sep);
         byte[] storedBytes = sep < 0 ? defaultStored : Arrays.copyOfRange(input, sep + 1, input.length);
 
+        // The stored record was written by the service, so it is valid UTF-8 text.
+        // Checked BEFORE any JSON parse: the service decodes it with
+        // new String(bytes), which turns an invalid byte into U+FFFD, while a
+        // byte-level JSON parser may treat the same byte differently. The two
+        // would then disagree about the record's attribute names, and the
+        // property check below would report a "change" that is only that
+        // difference. Such bytes cannot occur in production.
+        if (!isValidUtf8(storedBytes)) {
+            return;
+        }
+
         Map<String, Object> identity = parseObject(requestBytes);
-        JsonNode before = parseObjectNode(storedBytes);
+        JsonNode before = parseStoredLikeService(storedBytes);
         if (identity == null || before == null) {
             // Not JSON objects. The controller's validator rejects a
             // non-object identity before the service, and the database only
             // ever holds objects the service itself wrote.
             return;
         }
+        // Input domain: skip inputs the real front door is assumed to stop
+        // (README, "Input domain"). Without this the fuzzer keeps finding one
+        // root cause in new forms: attribute names used unescaped in JsonPath.
+        if (!IdRepoKnownIssues.looksLikeRealIdentity(identity)
+                || identity.containsKey(VERIFIED_ATTRIBUTES) // a sibling field of the request, service-managed
+                || !storedLooksPlausible(before)) {
+            return;
+        }
         // The service may modify the map it is given, so copy the key names.
         Set<String> requestKeys = new HashSet<>(identity.keySet());
+        // Computed before the call: the service may modify the map it is given.
+        boolean requestHasPathKey = IdRepoKnownIssues.hasPathSignificantKey(identity);
 
         Uin result;
         try {
@@ -246,9 +272,9 @@ public final class IdRepoServiceFuzzSupport {
             if (e instanceof IdRepoAppUncheckedException) {
                 return; // intended business error
             }
-            String knownIssue = IdRepoKnownIssues.match(e);
+            String knownIssue = IdRepoKnownIssues.matchUpdate(e, requestHasPathKey);
             if (knownIssue != null) {
-                IdRepoKnownIssues.note(knownIssue); // already reported upstream
+                IdRepoKnownIssues.note(knownIssue); // known, already reported upstream
                 return;
             }
             throw e; // anything else is a finding, with its original stack trace
@@ -286,6 +312,70 @@ public final class IdRepoServiceFuzzSupport {
     private static JsonNode parseObjectNode(byte[] bytes) {
         try {
             JsonNode node = MAPPER.readTree(bytes);
+            return node != null && node.isObject() ? node : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    // The stored record was written by the service earlier, so it has real
+    // attribute names, language codes, and verifiedAttributes as a list of strings.
+    private static boolean storedLooksPlausible(JsonNode stored) {
+        JsonNode verified = stored.get(VERIFIED_ATTRIBUTES);
+        if (verified != null) {
+            if (!verified.isArray()) {
+                return false;
+            }
+            for (JsonNode element : verified) {
+                if (!element.isTextual()) {
+                    return false;
+                }
+            }
+        }
+        Deque<JsonNode> pending = new ArrayDeque<>();
+        pending.push(stored);
+        while (!pending.isEmpty()) {
+            JsonNode node = pending.pop();
+            if (node.isObject()) {
+                Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+                while (fields.hasNext()) {
+                    Map.Entry<String, JsonNode> field = fields.next();
+                    if (!IdRepoKnownIssues.isAttributeName(field.getKey())) {
+                        return false;
+                    }
+                    if ("language".equals(field.getKey()) && field.getValue().isTextual()
+                            && !IdRepoKnownIssues.isLanguageCode(field.getValue().asText())) {
+                        return false;
+                    }
+                    pending.push(field.getValue());
+                }
+            } else if (node.isArray()) {
+                for (JsonNode child : node) {
+                    pending.push(child);
+                }
+            }
+        }
+        return true;
+    }
+
+    private static boolean isValidUtf8(byte[] bytes) {
+        try {
+            StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes));
+            return true;
+        } catch (CharacterCodingException e) {
+            return false;
+        }
+    }
+
+    // Reads the stored record exactly the way IdRepoServiceImpl.updateIdentity
+    // does (new String(bytes), then a JSON parse), so the "before" picture and
+    // the service always agree on what the record contains.
+    private static JsonNode parseStoredLikeService(byte[] bytes) {
+        try {
+            JsonNode node = MAPPER.readTree(new String(bytes));
             return node != null && node.isObject() ? node : null;
         } catch (IOException e) {
             return null;
@@ -343,18 +433,35 @@ public final class IdRepoServiceFuzzSupport {
             }
             JsonNode now = after.get(name);
             if (now == null || !now.equals(before.get(name))) {
-                throw new AssertionError("Attribute '" + name + "' was changed although the request did not "
-                        + "name it. before=" + abbreviate(before.get(name)) + " after=" + abbreviate(now));
+                String what = now == null ? "REMOVED" : now.isNull() ? "SET TO NULL" : "CHANGED";
+                throw new AssertionError("Attribute '" + escape(name) + "' was " + what + " although the request did "
+                        + "not name it. before=" + abbreviate(before.get(name)) + " after="
+                        + (now == null ? "(missing)" : abbreviate(now)) + " | top-level attributes before="
+                        + before.size() + " after=" + after.size());
             }
         }
         names = after.fieldNames();
         while (names.hasNext()) {
             String name = names.next();
             if (!before.has(name) && !requestKeys.contains(name) && !VERIFIED_ATTRIBUTES.equals(name)) {
-                throw new AssertionError("Attribute '" + name + "' was created although the request did not "
+                throw new AssertionError("Attribute '" + escape(name) + "' was CREATED although the request did not "
                         + "name it. value=" + abbreviate(after.get(name)));
             }
         }
+    }
+
+    // Shows non-ASCII and control characters as \\uXXXX so a hidden character in
+    // an attribute name is visible in the report.
+    private static String escape(String text) {
+        StringBuilder out = new StringBuilder();
+        for (char c : text.toCharArray()) {
+            if (c >= 32 && c < 127) {
+                out.append(c);
+            } else {
+                out.append(String.format("\\u%04X", (int) c));
+            }
+        }
+        return out.toString();
     }
 
     private static String abbreviate(JsonNode node) {
@@ -376,7 +483,7 @@ public final class IdRepoServiceFuzzSupport {
     private static void selfCheck() {
         Map<String, Object> identity = parseObject("{\"phone\":\"1234567890\"}".getBytes(StandardCharsets.UTF_8));
         Set<String> requestKeys = new HashSet<>(identity.keySet());
-        JsonNode before = parseObjectNode(defaultStored);
+        JsonNode before = parseStoredLikeService(defaultStored);
         long savesBefore = saveCalls;
 
         Uin result;

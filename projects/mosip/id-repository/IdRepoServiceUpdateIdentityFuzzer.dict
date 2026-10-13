@@ -11,7 +11,6 @@
 "\"dateOfBirth\""
 "\"proofOfAddress\""
 "\"selectedHandles\""
-"\"verifiedAttributes\""
 "\"UIN\""
 "\"IDSchemaVersion\""
 "\"eng\""
@@ -21,21 +20,12 @@
 "true"
 "{}"
 "[]"
-# The record separator between the request identity and the stored record.
-"\x00"
-# The update merge builds JsonPath expressions from key names, so give the
-# fuzzer the characters that are meaningful in a path or a filter.
-"."
-".."
 "["
 "]"
-"[0]"
-"$"
-"*"
-"@"
+# The record separator between the request identity and the stored record.
+"\x00"
+# Characters that appear in realistic VALUES (names such as O'Brien, dates, numbers).
 "'"
-"?"
-"=="
-"[?(@.language=='eng')]"
-"fullName.value"
-"a.b"
+"."
+"-"
+" "
