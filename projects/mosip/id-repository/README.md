@@ -39,6 +39,9 @@ written for them.
   from their test resources and loaded as a classpath resource.
 - `fixtures/identity-stored.json` -- MOSIP's sample identity, used as the default
   stored record by the service-level harness.
+- `experiments/took-effect/make_inputs.py` -- writes the inputs that confirm the
+  integrity candidates (see "Findings"). Not built or shipped: `build.sh` reads
+  only `seeds/` and `fixtures/`.
 
 ### Design notes
 
@@ -108,6 +111,14 @@ record (`fixtures/identity-stored.json`) is used. Seeds in
    longer a JSON object, its hash does not match, or a top-level attribute the
    request did not name was changed, removed or added (`verifiedAttributes` is
    exempt; the service manages it).
+3. *Experimental, off unless the environment sets `IDREPO_FUZZ_CHECK_EFFECT=1`:*
+   after a successful update, an attribute the request **did** name does not
+   hold the requested value. `UpdateModel` in `IdRepoServiceFuzzSupport` defines
+   the expectation: text trimmed, objects with a trimmed `value`, language lists
+   merged by language, `selectedHandles` replaced whole. It is a model of MOSIP's
+   behaviour, so a violation needs checking before it is called a bug. The
+   start-up self-check runs a known-valid update through it as a positive
+   control.
 
 **Why the property check exists.** The merge logic builds JsonPath expressions
 from key names in the request (splitting on dots, rewriting brackets and `=`),
@@ -209,20 +220,45 @@ all.
 | `update-trim-unchecked-casts` | `4a482cf5` (the old `selected-handles.bin` seed) | service | MOSIP bug, isolated; reachability via `selectedHandles` unconfirmed | Update fails with an unknown-error response |
 | `update-key-names-in-jsonpath` | `fc4f1ff8` (dotted name), `81578e0d` (empty name), `5c8d8552` (value characters in the filter path; that input was not realistic) | service | MOSIP bug, isolated | Update fails with an unknown-error response. JsonPath exceptions carry no stack trace, so the logs do not show where it failed |
 | stored number rewritten as `"Infinity"` (no filter entry; the oracle normalizes it) | `6caf6018` | service | MOSIP behaviour, isolated, low reachability | No error. An attribute's number silently becomes the string `"Infinity"` |
+| `update-language-change-dropped` | `candidate1-fewer-languages`, `candidate1b-change-and-add-language` (written by `experiments/took-effect/make_inputs.py`) | service, took-effect check on | MOSIP bug, isolated; **confirmed on the real build** | No error. The update reports success, but a change to an existing language is not saved when the request lists fewer languages than are stored, or also adds a new language |
+| `update-new-language-first-attribute-only` | `candidate2-new-language-in-three-attributes` | service, took-effect check on | MOSIP bug, isolated; **confirmed on the real build** | No error. A new language added to several attributes in one update is saved only in the first, alphabetically |
+| `update-string-null-dropped` | `candidate3-string-null` | service, took-effect check on | MOSIP bug, isolated; **confirmed on the real build** | No error. An attribute set to the text `"null"` keeps its old value |
 | invalid UTF-8 in a stored key | `f79a23e3` | service | harness artifact | none |
 | stored shape MOSIP never writes (`residenceStatus:["x","y"]`) | `16cb308a` | service | harness artifact | none |
 | out-of-memory | ClusterFuzz `oom-193bf56f...` (marked unreliable) | controller Update | harness configuration: `-Xmx2048m` left only about 500 MB of libFuzzer's 2,560 MB limit for everything outside the Java heap. No Java `OutOfMemoryError`; fixed with `-Xmx1536m` (see Design notes) | none |
 | unclassified | `90f2c364` (2 bytes, not JSON) | unknown; probably a retired smoke-test harness | | |
 
-**Candidates not yet seen by a harness** (unconfirmed on the real build):
+**The three integrity bugs, confirmed on October 22, 2026.** A property-based
+test of the merge code, extracted verbatim and run outside MOSIP (about 600,000
+merges, no crashes), first found them. They were then confirmed on the real build
+with the experimental took-effect check: all four candidate inputs fail and all
+three controls (normal updates of the same kinds) pass. Build tested: MOSIP commit
+_add the `rev` from `build/out/mosip-id-repository/SRCMAP_EXTRA.json`_. The service
+harness cannot see these with the check off, because its property check only
+verifies that unmentioned attributes are untouched. Mechanisms, from the sandbox:
+JSONAssert reports arrays of different lengths without field-level failures, so
+the pass that applies changes to existing languages never runs; and
+`updateMissingValues` reads only the first attribute named in JSONAssert's message.
+Reachability through the real API is unconfirmed: the front-door validator may
+require certain languages to be present. To reproduce:
 
-- *Property-based test of the merge code, extracted verbatim and run outside
-  MOSIP (about 600,000 merges, no crashes).* Three silent integrity issues: a
-  request listing fewer languages than are stored drops its change; a new
-  language added to several attributes in one update lands only in the first,
-  alphabetically; the string `"null"` is treated as JSON null and the update is
-  dropped. The service harness cannot see these: its property check only
-  verifies that unmentioned attributes are untouched.
+```bash
+python3 projects/mosip-id-repository/experiments/took-effect/make_inputs.py
+for f in projects/mosip-id-repository/experiments/took-effect/*.bin; do
+  echo "=== $(basename $f)"
+  python3 infra/helper.py reproduce -e IDREPO_FUZZ_CHECK_EFFECT=1 \
+    mosip-id-repository IdRepoServiceUpdateIdentityFuzzer $f 2>&1 \
+    | grep -E "== Java Exception|skipping known|Executed"
+done
+```
+
+Each `candidate*` input should fail with `AssertionError: Update did not take
+effect: ...` and each `control*` input should pass. A candidate that passes in a
+later build means upstream changed. A control that fails means the model is wrong
+for that case, not MOSIP.
+
+**Candidates not yet seen by a harness** (unconfirmed):
+
 - *From reading `IdRequestValidator`.* Line 187 of `validate()` calls
   `validateRequest(..., UPDATE)` unconditionally, after the id-specific branch
   has already called it. A create request is validated twice, the second time
