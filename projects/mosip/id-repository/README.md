@@ -66,6 +66,14 @@ written for them.
   unit, so it is not charged against libFuzzer's 25-second per-unit timeout.
   Done lazily it would be, and on a slower machine (the build bot, the
   ClusterFuzz bots) the very first input times out.
+- **The heap leaves room under libFuzzer's memory limit.** libFuzzer kills the
+  process when its *total* memory passes `-rss_limit_mb` (2,560 MB on ClusterFuzz).
+  A JVM's total is the heap plus class metadata, compiled code, thread stacks, GC
+  bookkeeping and libFuzzer's own memory. With `-Xmx2048m`, only about 500 MB was
+  left for all of that, and the controller harnesses (Spring MVC, Mockito) crossed
+  the limit without any Java `OutOfMemoryError`. `build.sh` now passes
+  `-Xmx1536m`, leaving about 1 GB. A real leak now shows up as a Java
+  `OutOfMemoryError` with a stack, not as an unexplained memory kill.
 - **Start-up self-check.** On start, each harness sends one known-valid
   request and fails loudly if it does not reach the faked service. A
   mis-wired harness would otherwise look like a healthy fuzzer that simply
@@ -203,7 +211,7 @@ all.
 | stored number rewritten as `"Infinity"` (no filter entry; the oracle normalizes it) | `6caf6018` | service | MOSIP behaviour, isolated, low reachability | No error. An attribute's number silently becomes the string `"Infinity"` |
 | invalid UTF-8 in a stored key | `f79a23e3` | service | harness artifact | none |
 | stored shape MOSIP never writes (`residenceStatus:["x","y"]`) | `16cb308a` | service | harness artifact | none |
-| out-of-memory (under investigation) | ClusterFuzz `oom-193bf56f...` | controller Update | probably the environment: process memory passed libFuzzer's 2,560 MB limit, with no Java `OutOfMemoryError` | none known |
+| out-of-memory | ClusterFuzz `oom-193bf56f...` (marked unreliable) | controller Update | harness configuration: `-Xmx2048m` left only about 500 MB of libFuzzer's 2,560 MB limit for everything outside the Java heap. No Java `OutOfMemoryError`; fixed with `-Xmx1536m` (see Design notes) | none |
 | unclassified | `90f2c364` (2 bytes, not JSON) | unknown; probably a retired smoke-test harness | | |
 
 **Candidates not yet seen by a harness** (unconfirmed on the real build):
