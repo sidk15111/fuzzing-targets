@@ -18,7 +18,8 @@ import java.util.regex.Pattern;
  * keep going.
  *
  * Rules:
- *   - Add an entry ONLY after the bug has been reported upstream.
+ *   - Add an entry ONLY after the bug is catalogued in the README ("Findings")
+ *     with its crash file. Reporting upstream is separate.
  *   - Delete the entry when upstream fixes it, so a regression is caught.
  *   - Match on exception type, the throwing method and, where it helps, the
  *     message. NEVER on line numbers, which drift whenever upstream edits.
@@ -56,6 +57,18 @@ public final class IdRepoKnownIssues {
      * validator in front of the service may reject these shapes.
      */
     static final String UPDATE_TRIM_UNCHECKED_CASTS = "update-trim-unchecked-casts";
+
+    /**
+     * IdRequestValidator.validateRequest() casts request.identity to a Map without
+     * checking its type ("((Map) requestMap.get(ROOT_PATH)).isEmpty()", line 242 at
+     * master 9332cc4), so a body whose "identity" is a string, number, array or
+     * boolean throws ClassCastException. Reachable through the real front door:
+     * Jackson binds "identity" as an untyped Object, and the schema validator only
+     * runs after this cast. validate() reaches it even when requesttime, version
+     * or id are invalid, because line 187 calls validateRequest() unconditionally.
+     * Seen in the controller harnesses on ClusterFuzz (October 2026).
+     */
+    static final String VALIDATOR_IDENTITY_NOT_OBJECT = "validator-identity-not-object";
 
 
     /**
@@ -111,6 +124,11 @@ public final class IdRepoKnownIssues {
                 && VALIDATOR.equals(className) && "validate".equals(methodName)
                 && message != null && message.contains("IdRequestDTO.getRequest()")) {
             return VALIDATOR_NULL_REQUEST;
+        }
+        if (t instanceof ClassCastException
+                && VALIDATOR.equals(className) && "validateRequest".equals(methodName)
+                && message != null && message.contains("java.util.Map")) {
+            return VALIDATOR_IDENTITY_NOT_OBJECT;
         }
         // contains(), not equals(): the failing cast is usually inside a lambda,
         // whose method is named like "lambda$updateRequestBodyData$3".
