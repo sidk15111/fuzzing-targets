@@ -32,7 +32,7 @@ ENV PATH=$JAVA_HOME/bin:$PATH
 # rather freeze a known-good revision instead (e.g. because a harness is
 # fragile against upstream refactors), add:
 #   && cd $SRC/id-repository && git checkout <commit-or-tag>
-RUN git clone --depth 1 https://github.com/mosip/id-repository.git \
+RUN git clone --depth 1 --branch develop https://github.com/mosip/id-repository.git \
     $SRC/id-repository
 
 # OSS-Fuzz plumbing -- harness files sit at $SRC root, sibling to the
